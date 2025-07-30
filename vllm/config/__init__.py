@@ -8,17 +8,20 @@ import enum
 import hashlib
 import inspect
 import json
+import os
 import textwrap
 import uuid
 import warnings
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
 from functools import cached_property, lru_cache
 from importlib.util import find_spec
+from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args)
 
+import model_signing
 import regex as re
 import torch
 from pydantic import (ConfigDict, SkipValidation, field_validator,
@@ -34,6 +37,7 @@ from vllm.config.cache import (BlockSize, CacheConfig, CacheDType,
 from vllm.config.compilation import (CompilationConfig, CompilationLevel,
                                      PassConfig)
 from vllm.config.parallel import DistributedExecutorBackend, ParallelConfig
+from vllm.config.signature_verification import SignatureVerificationConfig
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -466,6 +470,9 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    signature_verification_config: \
+        Optional[SignatureVerificationConfig] = None
+    """The model's signature verification configuration."""
 
     def compute_hash(self) -> str:
         """
