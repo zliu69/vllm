@@ -355,6 +355,18 @@ class LlamaModel(nn.Module):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
 
+        # When enable_attn_fusion is True, add o_proj layer to
+        # static forward context for fusing its quant op with self_attn
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.pass_config.enable_attn_fusion:
+            forward_context = compilation_config.static_forward_context
+            for layer in self.layers[self.start_layer:self.end_layer]:
+                o_proj_layer = layer.self_attn.o_proj
+                if o_proj_layer.prefix in forward_context:
+                    raise ValueError(
+                        f"Duplicate layer name: {o_proj_layer.prefix}")
+                forward_context[o_proj_layer.prefix] = o_proj_layer
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
