@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
 from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest)
@@ -287,7 +288,8 @@ def show_filtered_argument_or_group_from_help(parser: argparse.ArgumentParser,
 
 
 def get_max_tokens(max_model_len: int, request: Union[ChatCompletionRequest,
-                                                      CompletionRequest],
+                                                      CompletionRequest,
+                                                      AnthropicMessagesRequest],
                    input_length: int, default_sampling_params: dict) -> int:
 
     max_tokens = getattr(request, "max_completion_tokens",
