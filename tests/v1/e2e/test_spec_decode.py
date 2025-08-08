@@ -130,13 +130,13 @@ def test_ngram_correctness(
     [
         # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
         # (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False),
+        (("eagle3", "tencent/Hunyuan-1.8B-Instruct",
+          "AngelSlim/Hunyuan-1.8B-Instruct_eagle3", 1), False),
         (("eagle", "meta-llama/Llama-3.1-8B-Instruct",
           "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
         (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
           "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1), False),
-        (("eagle3", "tencent/Hunyuan-1.8B-Instruct",
-          "AngelSlim/Hunyuan-1.8B-Instruct_eagle3", 1), False),
-        pytest.param(
+       pytest.param(
             ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
              "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
             False,
@@ -148,10 +148,11 @@ def test_ngram_correctness(
             marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
     ],
     ids=[
-        "qwen3_eagle3", "llama3_eagle", "llama3_eagle3", "llama4_eagle",
-        "llama4_eagle_mm"
+        # "qwen3_eagle3",
+        "hunyuan_eagle3", "llama3_eagle", "llama3_eagle3", 
+        "llama4_eagle", "llama4_eagle_mm"
     ])
-@pytest.mark.parametrize("attn_backend",
+pytest.mark.parametrize("attn_backend",
                          get_attn_backend_list_based_on_platform())
 def test_eagle_correctness(
     monkeypatch: pytest.MonkeyPatch,
