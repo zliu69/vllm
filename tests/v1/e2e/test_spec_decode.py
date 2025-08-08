@@ -182,6 +182,9 @@ def test_eagle_correctness(
 
         method, model_name, spec_model_name, tp_size = model_setup
 
+        if "Hunyuan" in model_name and attn_backend == "TREE_ATTN":
+            pytest.skip("TREE ATTN not support Hunyuan Model yet")
+
         ref_llm = LLM(model=model_name,
                       max_model_len=2048,
                       tensor_parallel_size=tp_size)
