@@ -18,13 +18,16 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.platforms import current_platform
+from vllm.utils import round_up
 
-from .fusion import QUANT_OPS, GroupShape, QuantKey, empty_bf16, empty_fp32
+from .fusion import (QUANT_OPS, GroupShape, QuantKey, empty_bf16, empty_fp32,
+                     empty_i32)
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
+FP4_DTYPE = torch.uint8
 
 ATTN_OP = torch.ops.vllm.unified_attention_with_output.default
 RESHAPE_OP = torch.ops.aten.reshape.default
@@ -108,7 +111,8 @@ class AttentionStaticQuantPattern(AttentionQuantPattern):
                                       output=view_7,
                                       layer_name=self.layer_name,
                                       query_scale=q_scale,
-                                      output_scale=None)
+                                      output_scale=None,
+                                      output_scale_factor=None)
             attn_out_view = RESHAPE_OP(at1[1],
                                        [-1, self.num_heads * self.head_size])
 
@@ -131,7 +135,8 @@ class AttentionStaticQuantPattern(AttentionQuantPattern):
                                       output=view_7,
                                       layer_name=self.layer_name,
                                       query_scale=q_scale,
-                                      output_scale=out_scale)
+                                      output_scale=out_scale,
+                                      output_scale_factor=None)
 
             return RESHAPE_OP(at1[1], [-1, self.num_heads * self.head_size])
 
@@ -177,11 +182,15 @@ class QuantAttentionQuantPattern(AttentionQuantPattern):
         cache_file: Optional[str] = None,
     ):
         # for matching post quant
-        assert quant_dtype == FP8_DTYPE
-        quant_key = QuantKey(dtype=quant_dtype,
-                             static=True,
-                             group_shape=GroupShape.PER_TENSOR,
-                             symmetric=True)
+        if quant_dtype == FP8_DTYPE:
+            quant_key = QuantKey(dtype=quant_dtype,
+                                 static=True,
+                                 group_shape=GroupShape.PER_TENSOR,
+                                 symmetric=True)
+        elif quant_dtype == FP4_DTYPE:
+            quant_key = QuantKey(dtype=quant_dtype)
+        else:
+            raise ValueError(f"Unsupported quant dtype: {quant_dtype}")
         super().__init__(layer, quant_key)
 
         # for inserting pre quant
@@ -206,7 +215,10 @@ class QuantAttentionQuantPattern(AttentionQuantPattern):
                 and attn_impl.insert_query_quant_supported(
                     self.pre_quant_key.dtype, self.pre_quant_key.static,
                     self.pre_quant_key.group_shape)):
-            self._register(pm_pass)
+            if self.quant_key.dtype == FP8_DTYPE:
+                self._register_fp8_quant(pm_pass)
+            elif self.quant_key.dtype == FP4_DTYPE:
+                self._register_fp4_quant(pm_pass)
 
     def extra_check(self, match):
         """
@@ -223,7 +235,7 @@ class QuantAttentionQuantPattern(AttentionQuantPattern):
                      self.layer_name)
         return True
 
-    def _register(self, pm_pass: PatternMatcherPass):
+    def _register_fp8_quant(self, pm_pass: PatternMatcherPass):
 
         def pattern(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                     q_scale: torch.Tensor, attn_output: torch.Tensor,
@@ -237,7 +249,8 @@ class QuantAttentionQuantPattern(AttentionQuantPattern):
                                       output=attn_output,
                                       layer_name=self.layer_name,
                                       query_scale=q_scale,
-                                      output_scale=None)
+                                      output_scale=None,
+                                      output_scale_factor=None)
             # reshape output
             attn_output_view = RESHAPE_OP(
                 at1[1], [-1, self.num_heads * self.head_size])
@@ -282,7 +295,8 @@ class QuantAttentionQuantPattern(AttentionQuantPattern):
                                       output=attn_output,
                                       layer_name=self.layer_name,
                                       query_scale=q_scale,
-                                      output_scale=quant_input_scale)
+                                      output_scale=quant_input_scale,
+                                      output_scale_factor=None)
             # reshape output
             output = RESHAPE_OP(at2[1], [-1, self.num_heads * self.head_size])
             return output
@@ -299,6 +313,107 @@ class QuantAttentionQuantPattern(AttentionQuantPattern):
                 empty_fp32(1, 1),  # quant_input_scale
                 self.empty_quant(5, self.num_heads *
                                  self.head_size),  # quant_output
+            ]
+
+            pm.register_replacement(
+                pattern,
+                replacement,
+                inputs,
+                AttentionQuantPattern.wrap_trace_fn(
+                    AttentionQuantPattern.fx_view_to_reshape, pm.fwd_only),
+                pm_pass,
+                extra_check=lambda m: self.extra_check(m))
+
+    def _register_fp4_quant(self, pm_pass: PatternMatcherPass):
+
+        def pattern(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                    q_scale: torch.Tensor, attn_out: torch.Tensor,
+                    quant_input_scale: torch.Tensor, quant_out: torch.Tensor,
+                    quant_output_scale: torch.Tensor):
+            # attention
+            at1 = auto_functionalized(ATTN_OP,
+                                      query=q,
+                                      key=k,
+                                      value=v,
+                                      output=attn_out,
+                                      layer_name=self.layer_name,
+                                      query_scale=q_scale,
+                                      output_scale=None,
+                                      output_scale_factor=None)
+            # reshape output
+            attn_out_view = RESHAPE_OP(at1[1],
+                                       [-1, self.num_heads * self.head_size])
+            # quant output
+            at2 = auto_functionalized(self.QUANT_OP,
+                                      output=quant_out,
+                                      input=attn_out_view,
+                                      output_scale=quant_output_scale,
+                                      input_scale=quant_input_scale)
+            # view to fp8
+            quant_output_scale_view = torch.ops.aten.view.dtype(
+                at2[2], FP8_DTYPE)
+            return at2[1], quant_output_scale_view
+
+        def replacement(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                        q_scale: torch.Tensor, attn_out: torch.Tensor,
+                        quant_input_scale: torch.Tensor,
+                        quant_out: torch.Tensor,
+                        quant_output_scale: torch.Tensor):
+            # attention out in quant_dtype
+            attn_out = torch.ops.aten.full.default(
+                [q.shape[0], self.num_heads, self.head_size // 2],
+                0.0,
+                dtype=self.quant_dtype,
+                device=q.device)
+            # attention out scale factor
+            attn_out_scale_factor = torch.ops.aten.view.dtype(
+                quant_output_scale, FP8_DTYPE)
+            # q in pre_quant_dtype
+            q_quant_out = torch.ops.aten.empty.memory_format(
+                [q.shape[0], self.num_heads * self.head_size],
+                dtype=self.pre_quant_dtype,
+                device=q.device)
+
+            # reshape q
+            q_view1 = RESHAPE_OP(q, [-1, self.num_heads * self.head_size])
+            # quant q
+            at1 = auto_functionalized(self.PRE_QUANT_OP,
+                                      result=q_quant_out,
+                                      input=q_view1.contiguous(),
+                                      scale=q_scale)
+            # reshape q back
+            q_view2 = RESHAPE_OP(at1[1], [-1, self.num_heads, self.head_size])
+            # attention
+            at2 = auto_functionalized(
+                ATTN_OP,
+                query=q_view2,
+                key=k,
+                value=v,
+                output=attn_out,
+                layer_name=self.layer_name,
+                query_scale=q_scale,
+                output_scale=quant_input_scale,
+                output_scale_factor=attn_out_scale_factor)
+            # reshape output
+            output = RESHAPE_OP(at2[1],
+                                [-1, self.num_heads * self.head_size // 2])
+            return output, at2[2]
+
+        # Need custom fake mode, otherwise tracing happens with real tensors.
+        # That would not work for the unified_attention custom op.
+        with unset_fake_temporarily(), FakeTensorMode():
+            inputs = [
+                empty_bf16(5, self.num_heads, self.head_size),  # q
+                empty_bf16(5, self.num_heads, self.head_size),  # k
+                empty_bf16(5, self.num_heads, self.head_size),  # v
+                empty_fp32(1, 1),  # q_scale
+                empty_bf16(5, self.num_heads, self.head_size),  # attn_out
+                empty_fp32(1, 1),  # quant_input_scale
+                self.empty_quant(5,
+                                 self.num_heads * self.head_size),  # quant_out
+                empty_i32(128,
+                          round_up(self.num_heads * self.head_size // 16,
+                                   4)),  # quant_output_scale
             ]
 
             pm.register_replacement(
@@ -443,3 +558,9 @@ class AttnFusionPass(VllmInductorPass):
                                                      pre_quant_dtype=FP8_DTYPE,
                                                      cache_file=cache_file)
             pattern_fp8.register_if_supported(self.patterns)
+
+            pattern_fp4 = QuantAttentionQuantPattern(layer,
+                                                     quant_dtype=FP4_DTYPE,
+                                                     pre_quant_dtype=FP8_DTYPE,
+                                                     cache_file=cache_file)
+            pattern_fp4.register_if_supported(self.patterns)

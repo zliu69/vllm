@@ -13,6 +13,7 @@ from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
 from flashinfer.decode import (_get_range_buf, get_seq_lens,
                                trtllm_batch_decode_with_kv_cache)
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
+from flashinfer.utils import FP4Tensor
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -41,6 +42,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 
 FP8_DTYPE = current_platform.fp8_dtype()
+FP4_DTYPE = torch.uint8
 
 logger = init_logger(__name__)
 
@@ -675,8 +677,9 @@ class FlashInferImpl(AttentionImpl):
 
     def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
                                      group_shape: GroupShape):
-        supported_quant_type = (dtype == FP8_DTYPE and static and
-                                group_shape == GroupShape.PER_TENSOR)
+        supported_quant_type = ((dtype == FP8_DTYPE and static and
+                                 group_shape == GroupShape.PER_TENSOR)
+                                 or (dtype == FP4_DTYPE))
         return (self.support_trtllm_attn
                 and self.kv_cache_dtype.startswith("fp8")
                 and supported_quant_type)
@@ -699,6 +702,7 @@ class FlashInferImpl(AttentionImpl):
         attn_metadata: FlashInferMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_scale_factor: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashInfer.
 
@@ -721,8 +725,7 @@ class FlashInferImpl(AttentionImpl):
             # Profiling run.
             return output
 
-        bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
-        bmm2_scale = layer._v_scale_float
+        trtllm_fused_quant_dtype: Optional[torch.dtype] = None
         if output_scale is not None:
             assert layer.fused_quant, \
                 "Passed output_scale but the attn is not fused"
@@ -730,13 +733,28 @@ class FlashInferImpl(AttentionImpl):
                 "query must be quantized when the attn fusion applied"
             assert attn_metadata.q_data_type == FP8_DTYPE, \
                 "query must be quantized when the attn fusion applied"
-            assert output.dtype == FP8_DTYPE, \
-                "output must be quantized when the attn fusion applied"
+
             assert (attn_metadata.prefill_use_trtllm and
                     attn_metadata.decode_use_trtllm), "Must use TRT-LLM attn"
             assert layer._o_scale_float is not None, \
                 "Host o_scale_float should not be None"
-            bmm2_scale = bmm2_scale / layer._o_scale_float
+
+            if output.dtype == FP8_DTYPE:
+                assert output_scale_factor is None, \
+                    "output_scale_factor must not be passed "\
+                    "when the output dtype is FP8"
+                trtllm_fused_quant_dtype = FP8_DTYPE
+            elif output.dtype == FP4_DTYPE:
+                assert output_scale_factor is not None, \
+                    "output_scale_factor must be passed "\
+                    "when the output dtype is NVFP4"
+                trtllm_fused_quant_dtype = FP4_DTYPE
+            else:
+                raise ValueError(
+                    f"Not supported quantized output dtype: {output.dtype}")
+        elif output_scale_factor is not None:
+            raise ValueError("output_scale_factor is not supported "
+                             "when output_scale is not passed")
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
@@ -791,6 +809,16 @@ class FlashInferImpl(AttentionImpl):
 
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
         kv_cache_permute = kv_cache.permute(*stride_order)
+
+        # scale for trtllm attn
+        bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
+        bmm2_scale = layer._v_scale_float
+        o_sf_scale: Optional[float] = None
+        if trtllm_fused_quant_dtype == FP8_DTYPE:
+            bmm2_scale = bmm2_scale / layer._o_scale_float
+        elif trtllm_fused_quant_dtype == FP4_DTYPE:
+            o_sf_scale = 1 / layer._o_scale_float
+
         # Regular attention (common case).
         # Decodes are at the front and prefills are at the back,
         # according to reorder_batch()
@@ -829,6 +857,15 @@ class FlashInferImpl(AttentionImpl):
                 assert block_tables_prefill.is_contiguous()
                 assert seq_lens_prefill.is_contiguous()
 
+                if trtllm_fused_quant_dtype == FP8_DTYPE:
+                    out = output[num_decode_tokens:]
+                elif trtllm_fused_quant_dtype == FP4_DTYPE:
+                    out = FP4Tensor(
+                        data=output[num_decode_tokens:],
+                        scale=output_scale_factor,
+                        scale_start_index=num_decode_tokens,
+                        original_shape=prefill_query.shape)
+
                 trtllm_batch_context_with_kv_cache(
                     query=prefill_query,
                     kv_cache=kv_cache_permute,
@@ -844,7 +881,8 @@ class FlashInferImpl(AttentionImpl):
                     cum_seq_lens_kv=attn_metadata.paged_kv_indptr_gpu,
                     window_left=self.window_left,
                     sinks=self.sinks,
-                    out=output[num_decode_tokens:],
+                    o_sf_scale=o_sf_scale,
+                    out=out,
                 )
 
         if num_decode_tokens > 0:
@@ -881,6 +919,15 @@ class FlashInferImpl(AttentionImpl):
                 assert block_tables_decode.is_contiguous()
                 assert seq_lens_decode.is_contiguous()
 
+                if trtllm_fused_quant_dtype == FP8_DTYPE:
+                    out = output[:num_decode_tokens]
+                elif trtllm_fused_quant_dtype == FP4_DTYPE:
+                    out = FP4Tensor(
+                        data=output[:num_decode_tokens],
+                        scale=output_scale_factor,
+                        scale_start_index=0,
+                        original_shape=decode_query.shape)
+
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
                     kv_cache=kv_cache_permute,
@@ -892,7 +939,8 @@ class FlashInferImpl(AttentionImpl):
                     bmm2_scale=bmm2_scale,
                     window_left=self.window_left,
                     sinks=self.sinks,
-                    out=output[:num_decode_tokens],
+                    o_sf_scale=o_sf_scale,
+                    out=out,
                 )
         return output_padded
 
