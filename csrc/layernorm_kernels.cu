@@ -19,15 +19,15 @@ __device__ __forceinline__ T warp_sum(T v) {
 #ifdef __HIP_PLATFORM_AMD__
   const unsigned long long m = 0xffffffffffffffffull;  // HIP needs 64-bit mask
 #else
-  const unsigned           m = 0xffffffffu;            // CUDA 32-bit mask
+  const unsigned m = 0xffffffffu;  // CUDA 32-bit mask
 #endif
   // Always reduce over 32 lanes to match downstream logic.
   constexpr int kWidth = 32;
   v += __shfl_down_sync(m, v, 16, kWidth);
-  v += __shfl_down_sync(m, v, 8,  kWidth);
-  v += __shfl_down_sync(m, v, 4,  kWidth);
-  v += __shfl_down_sync(m, v, 2,  kWidth);
-  v += __shfl_down_sync(m, v, 1,  kWidth);
+  v += __shfl_down_sync(m, v, 8, kWidth);
+  v += __shfl_down_sync(m, v, 4, kWidth);
+  v += __shfl_down_sync(m, v, 2, kWidth);
+  v += __shfl_down_sync(m, v, 1, kWidth);
   return v;
 }
 
@@ -63,7 +63,7 @@ __device__ __forceinline__ void copy_row_to_shared_aligned(
   for (int i = tid; i < prefix; i += blockDim.x) dst[i] = src[i];
 
   // vector main
-  const int remain     = n_elems - prefix;
+  const int remain = n_elems - prefix;
   const int main_elems = (remain / perVec) * perVec;
   if (main_elems > 0) {
     const uint4* __restrict__ vsrc =
@@ -71,10 +71,9 @@ __device__ __forceinline__ void copy_row_to_shared_aligned(
 
 #if defined(__HIP_PLATFORM_AMD__)
     // ROCm: vector load from global, scalar 32-bit stores to shared
-    uint32_t* __restrict__ s32 =
-        reinterpret_cast<uint32_t*>(dst + prefix);
-    const int nvec = main_elems / perVec;       // 16B packets
-    constexpr int WORDS_PER_PKT = 16 / sizeof(uint32_t); // = 4
+    uint32_t* __restrict__ s32 = reinterpret_cast<uint32_t*>(dst + prefix);
+    const int nvec = main_elems / perVec;                 // 16B packets
+    constexpr int WORDS_PER_PKT = 16 / sizeof(uint32_t);  // = 4
     for (int v = tid; v < nvec; v += blockDim.x) {
       uint4 p = vsrc[v];
       const int base = v * WORDS_PER_PKT;
@@ -85,8 +84,7 @@ __device__ __forceinline__ void copy_row_to_shared_aligned(
     }
 #else
     // CUDA: vector load + vector store (fastest)
-    uint4* __restrict__ vdst =
-        reinterpret_cast<uint4*>(dst + prefix);
+    uint4* __restrict__ vdst = reinterpret_cast<uint4*>(dst + prefix);
     const int nvec = main_elems / perVec;
     for (int v = tid; v < nvec; v += blockDim.x) {
       uint4 p = vsrc[v];
@@ -101,12 +99,14 @@ __device__ __forceinline__ void copy_row_to_shared_aligned(
   __syncthreads();
 }
 
-// ---------------- vec/scalar ops (generic, used for all dtypes) ----------------
+// ---------------- vec/scalar ops (generic, used for all dtypes)
+// ----------------
 template <int V, typename T>
 struct VecMulNormWeight {
-  const vec_n_t<T, V>* __restrict__ wv;  // vector view of weight (aligned with in/out)
+  const vec_n_t<T, V>* __restrict__ wv;  // vector view of weight (aligned with
+                                         // in/out)
   float inv_rms;
-  int   stride_vec;
+  int stride_vec;
   mutable int64_t vec_idx;
 
   __device__ __forceinline__ void operator()(vec_n_t<T, V>& dst,
@@ -123,8 +123,8 @@ struct VecMulNormWeight {
 
 template <typename T>
 struct ScalarMulNormWeight {
-  const T* __restrict__ w_base;   // already offset by +prefix
-  T*       __restrict__ out_base; // out_row + prefix
+  const T* __restrict__ w_base;  // already offset by +prefix
+  T* __restrict__ out_base;      // out_row + prefix
   float inv_rms;
   __device__ __forceinline__ void operator()(T& dst, const T src) const {
     const int i = static_cast<int>(&dst - out_base);
@@ -139,12 +139,11 @@ __global__ void rms_norm_kernel(
     scalar_t* __restrict__ out,          // [..., hidden_size]
     const scalar_t* __restrict__ input,  // [..., hidden_size]
     const int64_t input_stride,
-    const scalar_t* __restrict__ weight, // [hidden_size]
+    const scalar_t* __restrict__ weight,  // [hidden_size]
     const float epsilon, const int /*num_tokens*/, const int hidden_size,
     int smem_elems) {
-
-  const scalar_t* __restrict__ in_row  = input + blockIdx.x * input_stride;
-  scalar_t*       __restrict__ out_row = out   + blockIdx.x * hidden_size;
+  const scalar_t* __restrict__ in_row = input + blockIdx.x * input_stride;
+  scalar_t* __restrict__ out_row = out + blockIdx.x * hidden_size;
 
   // Optional cached-row (half) when host provisioned shmem
   extern __shared__ unsigned char smem_raw[];
@@ -187,15 +186,17 @@ __global__ void rms_norm_kernel(
 
   acc_t total = acc_t(0);
   if (threadIdx.x < 32) {
-    acc_t v = (threadIdx.x < (blockDim.x + 31) / 32) ? warp_sums_sh[threadIdx.x] : acc_t(0);
+    acc_t v = (threadIdx.x < (blockDim.x + 31) / 32) ? warp_sums_sh[threadIdx.x]
+                                                     : acc_t(0);
     total = warp_sum<acc_t>(v);
     if (threadIdx.x == 0) warp_sums_sh[0] = total;
   }
   __syncthreads();
 
   // compute inv_rms in float to match baseline epsilon semantics
-  const float inv_rms =
-      rsqrtf(static_cast<float>(warp_sums_sh[0] / static_cast<acc_t>(hidden_size)) + epsilon);
+  const float inv_rms = rsqrtf(
+      static_cast<float>(warp_sums_sh[0] / static_cast<acc_t>(hidden_size)) +
+      epsilon);
 
   // -------- Fast path: HS == blockDim.x (e.g., 1024) --------
   if (hidden_size == blockDim.x) {
@@ -210,10 +211,9 @@ __global__ void rms_norm_kernel(
   constexpr int V = (sizeof(scalar_t) == 2) ? 8 : 4;  // 16B packets
   constexpr int WIDTH = V * sizeof(scalar_t);
 
-  const bool can_vec =
-      (hidden_size % V == 0) &&
-      same_phase(in_row, out_row, WIDTH) &&
-      same_phase(in_row, weight,  WIDTH);
+  const bool can_vec = (hidden_size % V == 0) &&
+                       same_phase(in_row, out_row, WIDTH) &&
+                       same_phase(in_row, weight, WIDTH);
 
   if (can_vec) {
     const uintptr_t addr = reinterpret_cast<uintptr_t>(in_row);
@@ -227,29 +227,24 @@ __global__ void rms_norm_kernel(
     }
 
     // vector main
-    const int remain   = hidden_size - prefix;
+    const int remain = hidden_size - prefix;
     const int main_len = (remain / V) * V;
     if (main_len > 0) {
       using VecT = vec_n_t<scalar_t, V>;
       const VecT* __restrict__ wv =
           reinterpret_cast<const VecT*>(weight + prefix);
 
-      VecMulNormWeight<V, scalar_t> vec_op{
-          /*wv=*/ wv,
-          /*inv_rms=*/ inv_rms,
-          /*stride_vec=*/ (int)blockDim.x,
-          /*vec_idx=*/ (int64_t)threadIdx.x
-      };
-      ScalarMulNormWeight<scalar_t> sca_op{
-          /*w_base=*/ weight + prefix,
-          /*out_base=*/ out_row + prefix,
-          /*inv_rms=*/ inv_rms
-      };
+      VecMulNormWeight<V, scalar_t> vec_op{/*wv=*/wv,
+                                           /*inv_rms=*/inv_rms,
+                                           /*stride_vec=*/(int)blockDim.x,
+                                           /*vec_idx=*/(int64_t)threadIdx.x};
+      ScalarMulNormWeight<scalar_t> sca_op{/*w_base=*/weight + prefix,
+                                           /*out_base=*/out_row + prefix,
+                                           /*inv_rms=*/inv_rms};
 
       const scalar_t* vin = use_cached ? (s_in + prefix) : (in_row + prefix);
-      vectorize_with_alignment<V>(
-          vin, out_row + prefix, main_len,
-          threadIdx.x, blockDim.x, vec_op, sca_op);
+      vectorize_with_alignment<V>(vin, out_row + prefix, main_len, threadIdx.x,
+                                  blockDim.x, vec_op, sca_op);
     }
 
     // scalar tail
@@ -268,7 +263,6 @@ __global__ void rms_norm_kernel(
     out_row[i] = xn * weight[i];
   }
 }
-
 
 /* Function specialization in the case of FP16/BF16 tensors.
    Additional optimizations we can make in this case are
@@ -369,9 +363,9 @@ fused_add_rms_norm_kernel(
 }  // namespace vllm
 
 static inline int ln_block_threads_unified(int H) {
-  int threads = (H >= 1024) ? 256
-             : (H >= 512)  ? 512
-                            : std::min(1024, ((H + 31) / 32) * 32);
+  int threads = (H >= 1024)  ? 256
+                : (H >= 512) ? 512
+                             : std::min(1024, ((H + 31) / 32) * 32);
   return std::min(1024, std::max(128, ((threads + 31) / 32) * 32));
 }
 
@@ -383,8 +377,8 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   TORCH_CHECK(input.stride(-1) == 1);
   TORCH_CHECK(weight.is_contiguous());
 
-  const int hidden_size   = input.size(-1);
-  const int num_tokens    = input.numel() / hidden_size;
+  const int hidden_size = input.size(-1);
+  const int num_tokens = input.numel() / hidden_size;
   const int64_t in_stride = input.stride(-2);
 
   dim3 grid(num_tokens);
@@ -393,28 +387,22 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  // Optional cached-row for FP16 (recommended). Kernel still works if this is 0.
+  // Optional cached-row for FP16 (recommended). Kernel still works if this is
+  // 0.
   size_t shmem_bytes = 0;
   int smem_elems = 0;
   if (input.scalar_type() == at::kHalf && hidden_size <= 4096) {
     shmem_bytes = static_cast<size_t>(hidden_size) * sizeof(at::Half);
-    smem_elems  = hidden_size;  // flag to kernel that shmem was provisioned
+    smem_elems = hidden_size;  // flag to kernel that shmem was provisioned
   }
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
-    vllm::rms_norm_kernel<scalar_t>
-        <<<grid, block, shmem_bytes, stream>>>(
-            out.data_ptr<scalar_t>(),
-            input.data_ptr<scalar_t>(),
-            in_stride,
-            weight.data_ptr<scalar_t>(),
-            static_cast<float>(epsilon),
-            num_tokens,
-            hidden_size,
-            smem_elems);
+    vllm::rms_norm_kernel<scalar_t><<<grid, block, shmem_bytes, stream>>>(
+        out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), in_stride,
+        weight.data_ptr<scalar_t>(), static_cast<float>(epsilon), num_tokens,
+        hidden_size, smem_elems);
   });
 }
-
 
 #define LAUNCH_FUSED_ADD_RMS_NORM(width)                                    \
   VLLM_DISPATCH_FLOATING_TYPES(                                             \
