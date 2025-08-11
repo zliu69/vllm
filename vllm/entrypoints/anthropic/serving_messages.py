@@ -295,6 +295,13 @@ class AnthropicServingMessages(OpenAIServingChat):
 
                         # last chunk including usage info
                         if len(origin_chunk.choices) == 0:
+                            if content_block_started:
+                                stop_chunk = AnthropicStreamEvent(
+                                    index=content_block_index,
+                                    type="content_block_stop",
+                                )
+                                data = stop_chunk.model_dump_json(exclude_unset=True)
+                                yield f"data: {data}\n\n"
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
                                 delta=AnthropicDelta(
@@ -381,15 +388,6 @@ class AnthropicServingMessages(OpenAIServingChat):
 
                         if origin_chunk.choices[0].finish_reason is not None:
                             finish_reason = origin_chunk.choices[0].finish_reason
-
-                            if content_block_started:
-                                stop_chunk = AnthropicStreamEvent(
-                                    index=content_block_index,
-                                    type="content_block_stop",
-                                )
-                                data = stop_chunk.model_dump_json(exclude_unset=True)
-                                yield f"data: {data}\n\n"
-                                content_block_started = False
                             continue
 
                 else:
