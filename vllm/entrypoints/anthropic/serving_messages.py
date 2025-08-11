@@ -24,13 +24,15 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
     AnthropicStreamEvent,
-    AnthropicUsage,
+    AnthropicUsage, AnthropicError,
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption, ConversationMessage, ChatCompletionMessageParam
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import ErrorResponse, RequestResponseMetadata
+from vllm.entrypoints.openai.protocol import ErrorResponse, RequestResponseMetadata, ChatCompletionRequest, \
+    ChatCompletionNamedToolChoiceParam, ChatCompletionToolsParam, ChatCompletionResponse, ChatCompletionStreamResponse, \
+    StreamOptions
 
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.sampling_params import BeamSearchParams
@@ -39,7 +41,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 logger = logging.getLogger(__name__)
 
 
-class AnthropicServingMessages(OpenAIServing):
+class AnthropicServingMessages(OpenAIServingChat):
     """Handler for Anthropic Messages API requests"""
 
     def __init__(
@@ -55,30 +57,150 @@ class AnthropicServingMessages(OpenAIServing):
             return_tokens_as_token_ids: bool = False,
             reasoning_parser: str = "",
             enable_auto_tools: bool = False,
-            exclude_tools_when_tool_choice_none: bool = False,
             tool_parser: Optional[str] = None,
             enable_prompt_tokens_details: bool = False,
             enable_force_include_usage: bool = False,
     ):
-        super().__init__(engine_client=engine_client,
-                         model_config=model_config,
-                         models=models,
-                         request_logger=request_logger,
-                         return_tokens_as_token_ids=return_tokens_as_token_ids,
-                         enable_force_include_usage=enable_force_include_usage)
+        super().__init__(
+            engine_client=engine_client,
+            model_config=model_config,
+            models=models,
+            response_role=response_role,
+            request_logger=request_logger,
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
+            return_tokens_as_token_ids=return_tokens_as_token_ids,
+            reasoning_parser=reasoning_parser,
+            enable_auto_tools=enable_auto_tools,
+            tool_parser=tool_parser,
+            enable_prompt_tokens_details=enable_prompt_tokens_details,
+            enable_force_include_usage=enable_force_include_usage,
+        )
+        self.stop_reason_map = {
+            "stop": "end_turn",
+            "length": "max_tokens",
+            "tool_calls": "tool_use",
+        }
 
-        self.response_role = response_role
-        self.chat_template = chat_template
-        self.chat_template_content_format: Final = chat_template_content_format
-        self.enable_prompt_tokens_details = enable_prompt_tokens_details
-        self.enable_force_include_usage = enable_force_include_usage
-        self.default_sampling_params = (
-            self.model_config.get_diff_sampling_param())
-        if self.default_sampling_params:
-            source = self.model_config.generation_config
-            source = "model" if source == "auto" else source
-            logger.info("Using default chat sampling params from %s: %s",
-                        source, self.default_sampling_params)
+    def _convert_anthropic_to_openai_request(
+            self, anthropic_request: AnthropicMessagesRequest
+    ) -> ChatCompletionRequest:
+        """Convert Anthropic message format to OpenAI format"""
+        openai_messages = []
+
+        # Add system message if provided
+        if anthropic_request.system:
+            openai_messages.append({"role": "system", "content": anthropic_request.system})
+
+        for msg in anthropic_request.messages:
+            openai_msg = {"role": msg.role}
+
+            if isinstance(msg.content, str):
+                openai_msg["content"] = msg.content
+            else:
+                # Handle complex content blocks
+                content_parts = []
+                tool_calls = []
+
+                for block in msg.content:
+                    if block.type == "text" and block.text:
+                        content_parts.append({"type": "text", "text": block.text})
+                    elif block.type == "image" and block.source:
+                        content_parts.append({
+                            "type": "image_url",
+                            "image_url": {"url": block.source.get("data", "")}
+                        })
+                    elif block.type == "tool_use":
+                        # Convert tool use to function call format
+                        tool_call = {
+                            "id": block.id or f"call_{int(time.time())}",
+                            "type": "function",
+                            "function": {
+                                "name": block.name,
+                                "arguments": json.dumps(block.input or {})
+                            }
+                        }
+                        tool_calls.append(tool_call)
+                    elif block.type == "tool_result":
+                        # For tool results, we need to create a tool message
+                        # This will be handled separately as a tool response message
+                        if msg.role == "user":
+                            # Tool result from user should be converted to tool message
+                            openai_messages.append({
+                                "role": "tool",
+                                "tool_call_id": block.id,
+                                "content": str(block.content) if block.content else ""
+                            })
+                        else:
+                            # Assistant tool result becomes regular text
+                            content_parts.append({
+                                "type": "text",
+                                "text": f"Tool result: {str(block.content) if block.content else ''}"
+                            })
+
+                # Add tool calls to the message if any
+                if tool_calls:
+                    openai_msg["tool_calls"] = tool_calls
+
+                # Add content parts if any
+                if content_parts:
+                    if len(content_parts) == 1 and content_parts[0]["type"] == "text":
+                        openai_msg["content"] = content_parts[0]["text"]
+                    else:
+                        openai_msg["content"] = content_parts
+                elif not tool_calls:
+                    # If no content and no tool calls, add empty content
+                    openai_msg["content"] = ""
+
+            openai_messages.append(openai_msg)
+
+        req = ChatCompletionRequest(
+            model=anthropic_request.model,
+            messages=openai_messages,
+            max_tokens=anthropic_request.max_tokens,
+            max_completion_tokens=anthropic_request.max_tokens,
+            stop=anthropic_request.stop_sequences,
+            temperature=anthropic_request.temperature,
+            top_p=anthropic_request.top_p,
+            top_k=anthropic_request.top_k,
+        )
+
+        if anthropic_request.stream:
+            req.stream = anthropic_request.stream
+            req.stream_options = StreamOptions.validate({"include_usage": True})
+
+        if anthropic_request.tool_choice is None:
+            req.tool_choice = None
+        elif anthropic_request.tool_choice.type == "auto":
+            req.tool_choice = "auto"
+        elif anthropic_request.tool_choice.type == "any":
+            req.tool_choice = "required"
+        elif anthropic_request.tool_choice.type == "tool":
+            req.tool_choice = ChatCompletionNamedToolChoiceParam.model_validate({
+                "type": "function",
+                "function": {
+                    "name": anthropic_request.tool_choice.get("name")
+                }
+            })
+
+        tools = []
+        if anthropic_request.tools is None:
+            return req
+        for tool in anthropic_request.tools:
+            tools.append(
+                ChatCompletionToolsParam.model_validate({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.input_schema
+                    }
+                })
+            )
+        if req.tool_choice is None:
+            req.tool_choice = "auto"
+        req.tools = tools
+        return req
 
     async def create_messages(
             self,
@@ -92,264 +214,212 @@ class AnthropicServingMessages(OpenAIServing):
         See https://docs.anthropic.com/en/api/messages
         for the API specification. This API mimics the Anthropic messages API.
         """
-        error_check_ret = await self._check_model(request)
-        if error_check_ret is not None:
-            logger.error("Error with model %s", error_check_ret)
-            return error_check_ret
+        chat_req = self._convert_anthropic_to_openai_request(request)
+        generator = await self.create_chat_completion(chat_req, raw_request)
 
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        if isinstance(generator, ErrorResponse):
+            return generator
 
-        try:
-            model_name = self._get_model_name(request.model)
+        elif isinstance(generator, ChatCompletionResponse):
+            return self.messages_full_converter(generator)
 
-            tokenizer = await self.engine_client.get_tokenizer()
+        return self.message_stream_converter(generator)
 
-            if request.system is not None:
-                system_message = ChatCompletionMessageParam(
-                    role="system",
-                    content=request.system,
-                )
-                request.messages = [system_message] + request.messages
-
-            (
-                conversation,
-                request_prompts,
-                engine_prompts,
-            ) = await self._preprocess_chat(
-                request,
-                tokenizer,
-                request.messages,
-                chat_template=request.chat_template or self.chat_template,
-                chat_template_content_format=self.chat_template_content_format,
-                tool_dicts=None,
-                chat_template_kwargs=request.chat_template_kwargs,
-                tool_parser=None,
-                truncate_prompt_tokens=request.truncate_prompt_tokens,
-            )
-
-        except (ValueError, TypeError, RuntimeError,
-                jinja2.TemplateError) as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(f"{e} {e.__cause__}")
-
-        request_id = "chatcmpl-" \
-                     f"{self._base_request_id(raw_request, request.request_id)}"
-
-        request_metadata = RequestResponseMetadata(request_id=request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
-
-        # Schedule the request and get the result generator.
-        generators: list[AsyncGenerator[RequestOutput, None]] = []
-        try:
-            for i, engine_prompt in enumerate(engine_prompts):
-                sampling_params: Union[SamplingParams, BeamSearchParams]
-
-                if self.default_sampling_params is None:
-                    self.default_sampling_params = {}
-
-                max_tokens = get_max_tokens(
-                    max_model_len=self.max_model_len,
-                    request=request,
-                    input_length=len(engine_prompt["prompt_token_ids"]),
-                    default_sampling_params=self.default_sampling_params)
-
-                sampling_params = request.to_sampling_params(max_tokens, self.default_sampling_params)
-
-                self._log_inputs(
-                    request_id,
-                    request_prompts[i],
-                    params=sampling_params,
-                    lora_request=None,
-                )
-
-                trace_headers = (None if raw_request is None else await
-                self._get_trace_headers(raw_request.headers))
-
-                generator = self.engine_client.generate(
-                    engine_prompt,
-                    sampling_params,
-                    request_id,
-                    trace_headers=trace_headers,
-                )
-                generators.append(generator)
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
-
-        assert len(generators) == 1
-        result_generator, = generators
-
-        # Streaming response
-        if request.stream:
-            return self.message_stream_generator(
-                result_generator,
-                request_id,
-                model_name,
-            )
-
-        try:
-            return await self.messages_full_generator(
-                result_generator,
-                request_id,
-                model_name,
-            )
-        except ValueError as e:
-            return self.create_error_response(str(e))
-
-    async def messages_full_generator(
+    def messages_full_converter(
             self,
-            result_generator: AsyncIterator[RequestOutput],
-            request_id: str,
-            model_name: str,
-    ) -> Union[ErrorResponse, AnthropicMessagesResponse]:
-
-        final_res: Optional[RequestOutput] = None
-
-        try:
-            async for res in result_generator:
-                final_res = res
-        except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
-
-        assert final_res is not None
-
-        # Should be only one output
-        assert len(final_res.outputs) == 1
-        output = final_res.outputs[0]
-
-        assert final_res.prompt_token_ids is not None
-        num_prompt_tokens = len(final_res.prompt_token_ids)
-        if final_res.encoder_prompt_token_ids is not None:
-            num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
-        num_generated_tokens = sum(
-            len(output.token_ids) for output in final_res.outputs)
-
-        # Tool calls not supported currently
-        content = output.text
-        stop_reason = "end_turn"
-        if output.finish_reason == "length":
-            stop_reason = "max_tokens"
-        elif output.finish_reason == "stop":
-            stop_reason = "stop_sequence"
-
-        message = AnthropicMessagesResponse(
-            content=[
-                AnthropicContentBlock(
-                    type="text",
-                    text=content,
-                )],
-            id=request_id,
-            model=model_name,
-            stop_reason=stop_reason,
+            generator: ChatCompletionResponse,
+    ) -> AnthropicMessagesResponse:
+        result = AnthropicMessagesResponse(
+            id=generator.id,
+            content=[],
+            model=generator.model,
             usage=AnthropicUsage(
-                input_tokens=num_prompt_tokens,
-                output_tokens=num_generated_tokens,
+                input_tokens=generator.usage.prompt_tokens,
+                output_tokens=generator.usage.completion_tokens,
             ),
         )
-        return message
+        if generator.choices[0].finish_reason == "stop":
+            result.stop_reason = "end_turn"
+        elif generator.choices[0].finish_reason == "length":
+            result.stop_reason = "max_tokens"
+        elif generator.choices[0].finish_reason == "tool_calls":
+            result.stop_reason = "tool_use"
 
-    async def message_stream_generator(
-            self,
-            result_generator: AsyncIterator[RequestOutput],
-            request_id: str,
-            model_name: str,
-    ) -> AsyncGenerator[str, None]:
-
-        # Send message_start event
-        chunk = AnthropicStreamEvent(
-            type="message_start",
-            messages=AnthropicMessagesResponse(
-                id=request_id,
-                content=[],
-                model=model_name,
-                usage=AnthropicUsage(
-                    input_tokens=0,
-                    output_tokens=0,
-                )
-            )
-        )
-        data = chunk.model_dump_json(exclude_unset=True)
-        yield f"data: {data}\n\n"
-
-        # Send content_block_start event
-        chunk = AnthropicStreamEvent(
-            type="content_block_start",
-            index=0,
-            content_block=AnthropicContentBlock(
+        content: List[AnthropicContentBlock] = [
+            AnthropicContentBlock(
                 type="text",
-                text=""
-            ),
-        )
-        data = chunk.model_dump_json(exclude_unset=True)
-        yield f"data: {data}\n\n"
-
-        accumulated_text = ""
-        input_tokens = 0
-        output_tokens = 0
-        try:
-            async for res in result_generator:
-                if res.prompt_token_ids is not None:
-                    input_tokens = len(res.prompt_token_ids)
-
-                for output in res.outputs:
-                    delta_text = output.text
-                    accumulated_text += delta_text
-                    output_tokens += len(output.token_ids)
-
-                    if not delta_text and not output.token_ids:
-                        # Chunked prefill case, don't return empty chunks
-                        continue
-
-                    if output.finish_reason is None:
-                        # Send token-by-token response for each request.n
-                        content_delta = AnthropicStreamEvent(
-                            type="content_block_delta",
-                            index=0,
-                            delta=AnthropicDelta(
-                                type="text_delta",
-                                text=delta_text
-                            )
-                        )
-
-                    # if the model is finished generating
-                    else:
-                        content_delta = AnthropicStreamEvent(
-                            type="content_block_stop",
-                            index=0,
-                        )
-
-                    data = content_delta.model_dump_json(exclude_unset=True)
-                    yield f"data: {data}\n\n"
-
-            final_chunk = AnthropicStreamEvent(
-                type="message_stop",
-                message=AnthropicMessagesResponse(
-                    id=request_id,
-                    content=[
-                        AnthropicContentBlock(
-                            type="text",
-                            text=accumulated_text,
-                        )
-                    ],
-                    model=model_name,
-                    usage=AnthropicUsage(
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                    ),
-                )
+                text=generator.choices[0].message.content
             )
-            final_chunk_data = final_chunk.model_dump_json(exclude_unset=True, exclude_none=True)
-            yield f"data: {final_chunk_data}\n\n"
+        ]
+
+        for tool_call in generator.choices[0].message.tool_calls:
+            anthropic_tool_call = AnthropicContentBlock(
+                type="tool_use",
+                id=tool_call.id,
+                name=tool_call.function.name,
+                input=json.loads(tool_call.function.arguments)
+            )
+            content += [anthropic_tool_call]
+
+        result.content = content
+
+        return result
+
+    async def message_stream_converter(
+            self,
+            generator: AsyncGenerator[str, None],
+    ) -> AsyncGenerator[str, None]:
+        try:
+            first_item = True
+            finish_reason = None
+            content_block_index = 0
+            content_block_started = False
+
+            async for item in generator:
+                if item.startswith("data:"):
+                    data_str = item[5:].strip().rstrip("\n")
+                    if data_str == "[DONE]":
+                        stop_message = AnthropicStreamEvent(
+                            type="message_stop",
+                        )
+                        data = stop_message.model_dump_json(exclude_unset=True, exclude_none=True)
+                        yield f"data: {data}\n\n"
+                        yield "data: [DONE]\n\n"
+                    else:
+                        origin_chunk = ChatCompletionStreamResponse.model_validate_json(data_str)
+
+                        if first_item:
+                            chunk = AnthropicStreamEvent(
+                                type="message_start",
+                                message=AnthropicMessagesResponse(
+                                    id=origin_chunk.id,
+                                    content=[],
+                                    model=origin_chunk.model,
+                                )
+                            )
+                            first_item = False
+                            data = chunk.model_dump_json(exclude_unset=True)
+                            yield f"data: {data}\n\n"
+                            continue
+
+                        # last chunk including usage info
+                        if len(origin_chunk.choices) == 0:
+                            chunk = AnthropicStreamEvent(
+                                type="message_delta",
+                                delta=AnthropicDelta(
+                                    stop_reason=self.stop_reason_map.get(finish_reason, "end_turn"),
+                                    usage=AnthropicUsage(
+                                        input_tokens=origin_chunk.usage.prompt_tokens or 0,
+                                        output_tokens=origin_chunk.usage.completion_tokens or 0
+                                    )
+                                )
+                            )
+                            data = chunk.model_dump_json(exclude_unset=True)
+                            yield f"data: {data}\n\n"
+                            continue
+
+                        # content
+                        if origin_chunk.choices[0].delta.content is not None:
+                            if not content_block_started:
+                                chunk = AnthropicStreamEvent(
+                                    index=content_block_index,
+                                    type="content_block_start",
+                                    content_block=AnthropicContentBlock(
+                                        type="text",
+                                        text=""
+                                    )
+                                )
+                                data = chunk.model_dump_json(exclude_unset=True)
+                                yield f"data: {data}\n\n"
+                                content_block_started = True
+
+                            chunk = AnthropicStreamEvent(
+                                index=content_block_index,
+                                type="content_block_delta",
+                                delta=AnthropicDelta(
+                                    type="text_delta",
+                                    text=origin_chunk.choices[0].delta.content
+                                )
+                            )
+                            data = chunk.model_dump_json(exclude_unset=True)
+                            yield f"data: {data}\n\n"
+                            continue
+
+                        # tool calls
+                        elif len(origin_chunk.choices[0].delta.tool_calls) > 0:
+                            tool_call = origin_chunk.choices[0].delta.tool_calls[0]
+                            if tool_call.id is not None:
+                                if content_block_started:
+                                    stop_chunk = AnthropicStreamEvent(
+                                        index=content_block_index,
+                                        type="content_block_stop",
+                                    )
+                                    data = stop_chunk.model_dump_json(exclude_unset=True)
+                                    yield f"data: {data}\n\n"
+                                    content_block_started = False
+                                    content_block_index += 1
+
+                                chunk = AnthropicStreamEvent(
+                                    index=content_block_index,
+                                    type="content_block_start",
+                                    content_block=AnthropicContentBlock(
+                                        type="tool_use",
+                                        id=tool_call.id,
+                                        name=tool_call.function.name if tool_call.function else None,
+                                        input={},
+                                    )
+                                )
+                                data = chunk.model_dump_json(exclude_unset=True)
+                                yield f"data: {data}\n\n"
+                                content_block_started = True
+
+                            else:
+                                chunk = AnthropicStreamEvent(
+                                    index=content_block_index,
+                                    type="content_block_delta",
+                                    delta=AnthropicDelta(
+                                        type="input_json_delta",
+                                        partial_json=tool_call.function.arguments
+                                    )
+                                )
+                                data = chunk.model_dump_json(exclude_unset=True)
+                                yield f"data: {data}\n\n"
+                            continue
+
+                        if origin_chunk.choices[0].finish_reason is not None:
+                            finish_reason = origin_chunk.choices[0].finish_reason
+
+                            if content_block_started:
+                                stop_chunk = AnthropicStreamEvent(
+                                    index=content_block_index,
+                                    type="content_block_stop",
+                                )
+                                data = stop_chunk.model_dump_json(exclude_unset=True)
+                                yield f"data: {data}\n\n"
+                                content_block_started = False
+                            continue
+
+                else:
+                    error_response = AnthropicStreamEvent(
+                        type="error",
+                        error=AnthropicError(
+                            type="internal_error",
+                            message="Invalid data format received"
+                        )
+                    )
+                    data = error_response.model_dump_json(exclude_unset=True)
+                    yield f"data: {data}\n\n"
+                    yield "data: [DONE]\n\n"
 
         except Exception as e:
-            # TODO: Use a vllm-specific Validation Error
-            logger.exception("Error in chat completion stream generator.")
-            data = self.create_streaming_error_response(str(e))
+            logger.exception("Error in message stream converter.")
+            error_response = AnthropicStreamEvent(
+                type="error",
+                error=AnthropicError(
+                    type="internal_error",
+                    message=str(e)
+                )
+            )
+            data = error_response.model_dump_json(exclude_unset=True)
             yield f"data: {data}\n\n"
-        # Send the final done message after all response.n are finished
-        yield "data: [DONE]\n\n"
+            yield "data: [DONE]\n\n"

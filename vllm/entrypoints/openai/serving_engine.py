@@ -75,7 +75,6 @@ from vllm.tracing import (contains_trace_headers, extract_trace_headers,
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import (AsyncMicrobatchTokenizer, is_list_of,
                         merge_async_iterators, random_uuid)
-from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 
 logger = init_logger(__name__)
 
@@ -85,10 +84,10 @@ CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
                               TokenizeCompletionRequest]
 
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
-                        TokenizeChatRequest, AnthropicMessagesRequest]
+                        TokenizeChatRequest]
 SpeechToTextRequest = Union[TranscriptionRequest, TranslationRequest]
 AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest, SpeechToTextRequest,
-                   ResponsesRequest, AnthropicMessagesRequest]
+                   ResponsesRequest]
 
 AnyResponse = Union[
     CompletionResponse,

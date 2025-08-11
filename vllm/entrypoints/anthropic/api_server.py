@@ -55,7 +55,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels, BaseMode
 # yapf: enable
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
-                                    log_non_default_args, with_cancellation)
+                                    with_cancellation)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
@@ -133,7 +133,7 @@ async def create_messages(request: AnthropicMessagesRequest,
                             status_code=generator.code)
 
     elif isinstance(generator, AnthropicMessagesResponse):
-        return JSONResponse(content=generator.model_dump())
+        return JSONResponse(content=generator.model_dump(exclude_none=True, exclude_unset=True))
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
@@ -232,7 +232,6 @@ def setup_server(args):
     ready to serve."""
 
     logger.info("vLLM API server version %s", VLLM_VERSION)
-    log_non_default_args(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
