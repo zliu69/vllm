@@ -14,8 +14,6 @@ import pandas as pd
 import psutil
 from tabulate import tabulate
 
-# results_folder = Path("results/")
-
 # latency results and the keys that will be printed into markdown
 latency_results = []
 latency_column_mapping = {
@@ -195,14 +193,12 @@ if __name__ == "__main__":
         "--result",
         type=str,
         default="results",
-        help="input filter string for json file names",
+        help="Folder name for benchmark output results.",
     )
     args = parser.parse_args()
-    result = args.result
-    if os.path.exists(result) is False:
-        print("results folder doesn't exit  : ", result)
-        exit(0)
-    results_folder = Path(result)
+    results_folder = Path(args.result)
+    if not results_folder.exists():
+        raise FileNotFoundError(f"results folder does not exist: {results_folder}")
     # collect results
     for test_file in results_folder.glob("*.json"):
         with open(test_file) as f:
