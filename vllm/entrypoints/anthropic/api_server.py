@@ -1,41 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from:
+# https://github.com/vllm/vllm/entrypoints/openai/api_server.py
 
 import asyncio
-import atexit
-import gc
-import importlib
-import inspect
-import json
-import multiprocessing
-import os
 import signal
-import socket
 import tempfile
-import uuid
 from argparse import Namespace
-from collections.abc import AsyncIterator, Awaitable
-from contextlib import asynccontextmanager
-from functools import partial
 from http import HTTPStatus
-from typing import Annotated, Any, Callable, Optional
+from typing import Optional
 
-import pydantic
 import uvloop
-from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
-from fastapi.exceptions import RequestValidationError
+from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from starlette.concurrency import iterate_in_threadpool
-from starlette.datastructures import URL, Headers, MutableHeaders, State
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.datastructures import State
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
-from vllm.engine.multiprocessing.client import MQLLMEngineClient
-from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import AnthropicErrorResponse, AnthropicMessagesRequest, \
     AnthropicMessagesResponse
@@ -49,7 +32,7 @@ from vllm.entrypoints.openai.api_server import validate_api_server_args, create_
     lifespan, build_async_engine_client, validate_json_request
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, ErrorResponse
+from vllm.entrypoints.openai.protocol import ErrorResponse
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels, BaseModelPath, LoRAModulePath
 #
 # yapf: enable
@@ -57,13 +40,9 @@ from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     with_cancellation)
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParserManager
-from vllm.transformers_utils.config import (
-    maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import MistralTokenizer
-from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (Device, FlexibleArgumentParser,
-                        get_open_zmq_ipc_path, is_valid_ipv6_address,
+from vllm.utils import (FlexibleArgumentParser,
+                        is_valid_ipv6_address,
                         set_ulimit)
 from vllm.version import __version__ as VLLM_VERSION
 

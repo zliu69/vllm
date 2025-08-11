@@ -4,18 +4,13 @@
 # https://github.com/vllm/vllm/entrypoints/openai/serving_chat.py
 
 """Anthropic Messages API serving handler"""
-import asyncio
-import copy
 import json
 import logging
 import time
-from typing import Any, AsyncGenerator, Dict, List, Optional, Union, Final, AsyncIterator
-import uuid
-import jinja2
+from typing import AsyncGenerator, List, Optional, Union
 
 from fastapi import Request
 
-from vllm import SamplingParams, RequestOutput
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
@@ -26,17 +21,13 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicStreamEvent,
     AnthropicUsage, AnthropicError,
 )
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption, ConversationMessage, ChatCompletionMessageParam
+from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import ErrorResponse, RequestResponseMetadata, ChatCompletionRequest, \
+from vllm.entrypoints.openai.protocol import ErrorResponse, ChatCompletionRequest, \
     ChatCompletionNamedToolChoiceParam, ChatCompletionToolsParam, ChatCompletionResponse, ChatCompletionStreamResponse, \
     StreamOptions
-
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.utils import get_max_tokens
-from vllm.sampling_params import BeamSearchParams
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = logging.getLogger(__name__)
 
