@@ -324,6 +324,8 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 yield f"data: {data}\n\n"
                                 content_block_started = True
 
+                            if origin_chunk.choices[0].delta.content == "":
+                                continue
                             chunk = AnthropicStreamEvent(
                                 index=content_block_index,
                                 type="content_block_delta",
