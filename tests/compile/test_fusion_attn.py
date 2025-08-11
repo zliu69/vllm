@@ -9,7 +9,8 @@ from tests.compile.backend import TestBackend
 from tests.models.utils import check_outputs_equal
 from vllm import LLM, SamplingParams
 from vllm.attention import Attention
-from vllm.compilation.fusion import QUANT_OPS, QuantKey, kFp8StaticTensorSym
+from vllm.compilation.fusion import (QUANT_OPS, QuantKey, kFp8StaticTensorSym,
+                                     kNvFp4Quant)
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes, is_auto_func
 from vllm.compilation.noop_elimination import NoOpEliminationPass
@@ -18,13 +19,15 @@ from vllm.config import (CacheConfig, CompilationConfig, CompilationLevel,
                          SchedulerConfig, VllmConfig, set_current_vllm_config)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8Config
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptFp8Config, ModelOptNvFp4Config)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FP8_DTYPE = current_platform.fp8_dtype()
+FP4_DTYPE = torch.uint8
 
 # globals needed for string-import custom Dynamo backend field
 backend: Optional[TestBackend] = None
@@ -188,15 +191,40 @@ class TestQuantAttentionQuantPatternModel(torch.nn.Module):
             self.o_proj.prefix] = self.o_proj
 
         # Initialize weights for the o_proj layer
-        with torch.no_grad():
-            self.o_proj.input_scale.fill_(1.0)
-            self.o_proj.weight_scale.fill_(1.0)
+        self.init_o_proj_weights()
 
-            # Create a temporary float tensor then copy to FP8 weight
-            temp_weight = torch.randn_like(self.o_proj.weight,
-                                           dtype=torch.float16)
-            torch.nn.init.normal_(temp_weight, mean=0.0, std=0.01)
-            self.o_proj.weight.copy_(temp_weight.to(self.o_proj.weight.dtype))
+    def init_o_proj_weights(self):
+        """Initialize weights for the o_proj layer."""
+        with torch.no_grad():
+            if self.quant_dtype == FP8_DTYPE:
+                # input_scale(f32), weight_scale(f32), weight(fp8[])
+                self.o_proj.input_scale.fill_(1.0)
+                self.o_proj.weight_scale.fill_(1.0)
+
+                # Create weights using randn_like with proper dtype
+                _w = torch.randn_like(self.o_proj.weight, dtype=torch.float16)
+                torch.nn.init.normal_(_w, mean=0.0, std=0.01)
+                self.o_proj.weight.copy_(_w.to(self.o_proj.weight.dtype))
+
+            elif self.quant_dtype == FP4_DTYPE:
+                # input_scale(f32), weight_scale_2(f32)
+                # weight(u8[]), weight_scale(f8[])
+                self.o_proj.input_scale.fill_(1.0)
+                self.o_proj.weight_scale_2.fill_(1.0)
+
+                # Create uint8 weights using randint (0-255 range for uint8)
+                _w = torch.randint(0,
+                                   256,
+                                   self.o_proj.weight.shape,
+                                   dtype=torch.uint8)
+                self.o_proj.weight.copy_(_w.to(self.o_proj.weight.dtype))
+
+                # Create weight_scale using randn_like with proper dtype
+                _w_scale = torch.randn_like(self.o_proj.weight_scale,
+                                            dtype=torch.float16)
+                torch.nn.init.normal_(_w_scale, mean=0.0, std=0.01)
+                self.o_proj.weight_scale.copy_(
+                    _w_scale.to(self.o_proj.weight_scale.dtype))
 
             # Process weights to handle transposition and other setup required
             # by quantization method.
@@ -284,6 +312,8 @@ class TestQuantAttentionQuantPatternModel(torch.nn.Module):
         # Before fusion: o_proj has internal FP8 quantization ops
         if self.quant_dtype == FP8_DTYPE:
             quant_key = kFp8StaticTensorSym
+        elif self.quant_dtype == FP4_DTYPE:
+            quant_key = kNvFp4Quant
         else:
             raise ValueError(f"Unsupported quant_dtype: {self.quant_dtype}")
         return QUANT_OPS[quant_key]
@@ -301,7 +331,10 @@ class TestQuantAttentionQuantPatternModel(torch.nn.Module):
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("num_tokens", [7, 256, 533])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("quant_dtype", [FP8_DTYPE])
+@pytest.mark.parametrize(
+    "model_quant_dtype",
+    [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", FP8_DTYPE),
+     ("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4", FP4_DTYPE)])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
 @pytest.mark.skipif(not current_platform.is_device_capability((10, 0)),
@@ -309,8 +342,9 @@ class TestQuantAttentionQuantPatternModel(torch.nn.Module):
 def test_quant_attention_quant_pattern(num_heads: tuple[int,
                                                         int], head_size: int,
                                        num_tokens: int, dtype: torch.dtype,
-                                       quant_dtype: torch.dtype, monkeypatch,
-                                       dist_init):
+                                       model_quant_dtype: tuple[str,
+                                                                torch.dtype],
+                                       monkeypatch, dist_init):
     """Test QuantAttentionQuantPattern fusion pass with FlashInfer V1 backend"""
 
     # Enable FlashInfer v1 backend for this test
@@ -326,14 +360,22 @@ def test_quant_attention_quant_pattern(num_heads: tuple[int,
     kv_cache_dtype = FP8_DTYPE
     kv_cache_dtype_str = "fp8"
 
+    model_name, quant_dtype = model_quant_dtype
+
     if quant_dtype == FP8_DTYPE:
-        quant_config = ModelOptFp8Config(is_checkpoint_fp8_serialized=True)
+        quant_config = ModelOptFp8Config(is_checkpoint_fp8_serialized=True,
+                                         kv_cache_quant_method="FP8",
+                                         exclude_modules=[])
+    elif quant_dtype == FP4_DTYPE:
+        quant_config = ModelOptNvFp4Config(is_checkpoint_nvfp4_serialized=True,
+                                           kv_cache_quant_algo="FP8",
+                                           exclude_modules=[])
     else:
         raise ValueError(f"Unsupported quant_dtype: {quant_dtype}")
 
     vllm_config = VllmConfig(
         model_config=ModelConfig(
-            model="nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+            model=model_name,
             max_model_len=2048,
         ),
         parallel_config=ParallelConfig(tensor_parallel_size=1),

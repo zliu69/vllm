@@ -11,6 +11,7 @@ import torch
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 FP8_DTYPE = torch.float8_e4m3fn
+FP4_DTYPE = torch.uint8
 
 # KV Cache Layout for TRT-LLM
 # kv_cache_shape = (num_blocks, 2, num_kv_heads, page_size, head_dim)
@@ -58,7 +59,7 @@ def benchmark_decode(
     sm_scale = float(1.0 / (head_dim**0.5))
 
     q = torch.randn(num_seqs, num_qo_heads, head_dim, device=device, dtype=dtype)
-    if fused_quant_dtype == FP8_DTYPE:
+    if fused_quant_dtype in (FP8_DTYPE, FP4_DTYPE):
         trtllm_q, _ = to_float8(q)
     else:
         trtllm_q = q
@@ -79,40 +80,6 @@ def benchmark_decode(
     if kv_cache_dtype == FP8_DTYPE:
         kv_cache, _ = to_float8(kv_cache)
 
-    output_trtllm = torch.empty(q.shape, dtype=fused_quant_dtype)
-
-    # Benchmark TRT decode
-    def trt_decode():
-        return flashinfer.decode.trtllm_batch_decode_with_kv_cache(
-            trtllm_q,
-            kv_cache,
-            workspace_buffer,
-            block_tables,
-            kv_lens_tensor,
-            max_kv_len,
-            bmm1_scale=k_scale * sm_scale,
-            bmm2_scale=v_scale,
-            out=output_trtllm,
-        )
-
-    def time_fn(fn, warmup=10, trials=20):
-        torch.cuda.synchronize()
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        times = []
-        for i in range(warmup):
-            fn()
-        for i in range(trials):
-            start.record()
-            fn()
-            end.record()
-            torch.cuda.synchronize()
-            times.append(start.elapsed_time(end))  # ms
-        return sum(times) / len(times), torch.std(torch.tensor(times))
-
-    # TRT Decode
-    trt_mean, trt_std = time_fn(trt_decode)
-
     kv_indptr = [0]
     kv_indices = []
     kv_last_page_lens = []
@@ -130,8 +97,6 @@ def benchmark_decode(
     kv_indptr = torch.tensor(kv_indptr, dtype=torch.int32)
     kv_indices = torch.tensor(kv_indices, dtype=torch.int32)
     kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32)
-
-    output_baseline = torch.empty(q.shape, dtype=dtype)
 
     wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
         workspace_buffer,
@@ -152,9 +117,41 @@ def benchmark_decode(
         kv_data_type=kv_cache_dtype,
     )
 
-    def baseline_decode():
-        return wrapper.run(q, kv_cache, sm_scale, k_scale, v_scale, output_baseline)
+    def time_fn(fn, warmup=10, trials=20):
+        torch.cuda.synchronize()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        times = []
+        for i in range(warmup):
+            fn()
+        for i in range(trials):
+            start.record()
+            fn()
+            end.record()
+            torch.cuda.synchronize()
+            times.append(start.elapsed_time(end))  # ms
+        return sum(times) / len(times), torch.std(torch.tensor(times))
 
+    def baseline_decode():
+        return wrapper.run(q, kv_cache, sm_scale, k_scale, v_scale)
+
+    def trt_decode():
+        out_dtype = "nvfp4" if fused_quant_dtype == FP4_DTYPE else None
+        o_sf_scale = 1.0 if fused_quant_dtype == FP4_DTYPE else None
+        return flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+            trtllm_q,
+            kv_cache,
+            workspace_buffer,
+            block_tables,
+            kv_lens_tensor,
+            max_kv_len,
+            bmm1_scale=k_scale * sm_scale,
+            bmm2_scale=v_scale,
+            out_dtype=out_dtype,
+            o_sf_scale=o_sf_scale,
+        )
+
+    trt_mean, trt_std = time_fn(trt_decode)
     baseline_mean, baseline_std = time_fn(baseline_decode)
 
     # Calculate percentage speedup (positive means TRT is faster)
@@ -273,6 +270,24 @@ if __name__ == "__main__":
                 dtype=torch.bfloat16,
                 kv_cache_dtype=FP8_DTYPE,
                 fused_quant_dtype=FP8_DTYPE,
+            )
+            all_results.append(result)
+
+    print(
+        "Running benchmark for q_dtype = fp8, kv_cache_dtype: fp8, output_dtype: nvfp4"
+    )
+    print(
+        "\tnum_seqs\tmax_seq_len\ttrt_mean\ttrt_std\tbaseline_mean\t"
+        "baseline_std\tspeedup_percent"
+    )
+    for max_seq_len in max_seq_lens:
+        for bs in num_seqs:
+            result = benchmark_decode(
+                bs,
+                max_seq_len,
+                dtype=torch.bfloat16,
+                kv_cache_dtype=FP8_DTYPE,
+                fused_quant_dtype=FP4_DTYPE,
             )
             all_results.append(result)
 
