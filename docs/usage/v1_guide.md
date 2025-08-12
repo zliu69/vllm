@@ -154,12 +154,16 @@ differences compared to V0:
 
 ##### Logprobs Calculation
 
-Logprobs in V1 are now returned immediately once computed from the model’s raw output (i.e.
+By default, logprobs in V1 are now returned immediately once computed from the model’s raw output (i.e.
 before applying any logits post-processing such as temperature scaling or penalty
 adjustments). As a result, the returned logprobs do not reflect the final adjusted
 probabilities used during sampling.
 
-Support for logprobs with post-sampling adjustments is in progress and will be added in future updates.
+You can adjust this behavior by setting the `--logprobs-mode` flag.
+We support 5 modes: `raw_logprobs` (default), `processed_logprobs`, `final_logprobs`, `raw_logits`, `processed_logits`.
+Raw means the values before applying any logit processors, like bad words.
+Processed means the values after applying all processors, except argmax invariant processors (e.g. min_p),
+temperature and top_k/top_p. Final means after applying all logit processors.
 
 ##### Prompt Logprobs with Prefix Caching
 
