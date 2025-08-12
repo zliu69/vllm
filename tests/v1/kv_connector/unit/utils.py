@@ -40,7 +40,6 @@ def assert_scheduler_empty(scheduler: Scheduler):
     # KVCache Manager.
     assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                req_to_blocks) == 0
-    assert len(scheduler.kv_cache_manager.req_to_block_hashes) == 0
     assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                num_cached_block) == 0
     num_free_blocks = (
@@ -168,6 +167,7 @@ def create_model_runner_output(
     finished_sending: Optional[list[str]] = None,
     finished_recving: Optional[list[str]] = None,
     use_eos: bool = False,
+    token_id: int = 0,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
 
@@ -176,7 +176,7 @@ def create_model_runner_output(
     req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
 
     # Make sampled tokens.
-    sampled_token = EOS_TOKEN_ID if use_eos else 0
+    sampled_token = EOS_TOKEN_ID if use_eos else token_id
     sampled_token_ids = [[sampled_token] for _ in req_ids]
 
     kv_connector_output = None if (
