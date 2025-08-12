@@ -80,6 +80,7 @@ class AsyncLLM(EngineClient):
         Returns:
             None
         """
+        self._startup_ts = time.time()
         if not envs.VLLM_USE_V1:
             raise ValueError(
                 "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
@@ -127,6 +128,7 @@ class AsyncLLM(EngineClient):
 
         # Loggers.
         self.logger_manager: Optional[StatLoggerManager] = None
+        elapsed = time.time() - self._startup_ts
         if self.log_stats:
             self.logger_manager = StatLoggerManager(
                 vllm_config=vllm_config,
