@@ -230,24 +230,17 @@ class Worker(LocalOrDistributedWorkerBase):
             tensorizer_config=tensorizer_config, )
 
     @torch.inference_mode()
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
-        """Profiles the peak memory usage of the model to determine how many
-        KV blocks may be allocated without OOMs.
-
-        The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the maximum possible number of GPU and CPU blocks
-        that can be allocated with the remaining free memory.
-
-        Tip:
-            You may limit the usage of GPU memory
-            by adjusting the `gpu_memory_utilization` parameter.
-        """
-        # Profile the memory usage of the model and get the maximum number of
-        # cache blocks that can be allocated with the remaining free memory.
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-
-        free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
+    def determine_available_kv_cache_memory(self,
+                                            total_gpu_memory: int) -> float:
+        if kv_cache_memory := self.cache_config.kv_cache_memory:
+            msg = (f"(Reserved {kv_cache_memory:.2f}GiB memory for KV Cache "
+                   "as specified by kv_cache_memory config and skipped "
+                   "memory profiling. This does does not respect the "
+                   "gpu_memory_utilization config. Only use kv_cache_memory "
+                   "config when you want manual control of KV cache memory "
+                   "size.")
+            logger.info(msg)
+            return self.cache_config.kv_cache_memory * GiB_bytes
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -260,21 +253,9 @@ class Worker(LocalOrDistributedWorkerBase):
 
         memory_for_current_instance = total_gpu_memory * \
             self.cache_config.gpu_memory_utilization
+
         available_kv_cache_memory = (memory_for_current_instance -
                                      result.non_kv_cache_memory)
-
-        # Calculate the number of blocks that can be allocated with the
-        # profiled peak memory.
-        cache_block_size = self.get_cache_block_size_bytes()
-        if cache_block_size == 0:
-            num_gpu_blocks = 0
-            num_cpu_blocks = 0
-        else:
-            num_gpu_blocks = int(available_kv_cache_memory // cache_block_size)
-            num_cpu_blocks = int(self.cache_config.swap_space_bytes //
-                                 cache_block_size)
-        num_gpu_blocks = max(num_gpu_blocks, 0)
-        num_cpu_blocks = max(num_cpu_blocks, 0)
 
         msg = (f"Memory profiling takes {result.profile_time:.2f} seconds\n"
                "the current vLLM instance can use "
@@ -293,6 +274,43 @@ class Worker(LocalOrDistributedWorkerBase):
                f"{(available_kv_cache_memory / GiB_bytes):.2f}GiB.")
 
         logger.info(msg)
+        return available_kv_cache_memory
+
+    @torch.inference_mode()
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        """Profiles the peak memory usage of the model to determine how many
+        KV blocks may be allocated without OOMs.
+
+        The engine will first conduct a profiling of the existing memory usage.
+        Then, it calculate the maximum possible number of GPU and CPU blocks
+        that can be allocated with the remaining free memory.
+
+        Tip:
+            You may limit the usage of GPU memory
+            by adjusting the `gpu_memory_utilization` parameter.
+        """
+        # Profile the memory usage of the model and get the maximum number of
+        # cache blocks that can be allocated with the remaining free memory.
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
+        free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
+        available_kv_cache_memory = self.determine_available_kv_cache_memory(
+            total_gpu_memory)
+
+        # Calculate the number of blocks that can be allocated with the
+        # profiled peak memory.
+        cache_block_size = self.get_cache_block_size_bytes()
+        if cache_block_size == 0:
+            num_gpu_blocks = 0
+            num_cpu_blocks = 0
+        else:
+            num_gpu_blocks = int(available_kv_cache_memory // cache_block_size)
+            num_cpu_blocks = int(self.cache_config.swap_space_bytes //
+                                 cache_block_size)
+        num_gpu_blocks = max(num_gpu_blocks, 0)
+        num_cpu_blocks = max(num_cpu_blocks, 0)
+
         # Final cleanup
         gc.collect()
 
