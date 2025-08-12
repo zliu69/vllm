@@ -290,6 +290,7 @@ class AttentionImpl(ABC, Generic[T]):
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_scale_factor: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -308,6 +309,15 @@ class AttentionImpl(ABC, Generic[T]):
         """
         return False
 
+    def insert_query_quant_supported(self, dtype: torch.dtype, static: bool,
+                                     group_shape: GroupShape):
+        """
+        Does this attention implementation allow AttnFusionPass to insert a
+        Quant op on the `query` tensor before the Attention op such that the
+        Attention op receives the already quantized `query` tensor.
+        """
+        return False
+
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
 
@@ -322,6 +332,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_scale_factor: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 

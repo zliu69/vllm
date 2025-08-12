@@ -10,6 +10,8 @@ import flashinfer
 import torch
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
+FP8_DTYPE = torch.float8_e4m3fn
+FP4_DTYPE = torch.uint8
 
 # KV Cache Layout for TRT-LLM
 # kv_cache_shape = (num_blocks, 2, num_kv_heads, page_size, head_dim)
@@ -32,11 +34,14 @@ def benchmark_prefill(
     dtype=torch.bfloat16,
     kv_layout="HND",
     num_kv_heads=8,
-    kv_cache_dtype="auto",
+    kv_cache_dtype=torch.bfloat16,
+    fused_quant_dtype=None,
     head_dim=128,
     warmup=10,
     trials=20,
 ):
+    fused_quant_dtype = dtype if fused_quant_dtype is None else fused_quant_dtype
+
     torch.set_default_device("cuda")
     torch.manual_seed(0)
 
@@ -63,6 +68,10 @@ def benchmark_prefill(
         ]
     )
     q = torch.randn(sum(q_lens), num_qo_heads, head_dim, dtype=dtype)
+    if fused_quant_dtype in (FP8_DTYPE, FP4_DTYPE):
+        trtllm_q, _ = to_float8(q)
+    else:
+        trtllm_q = q
 
     kv_lens = [random.randint(0, MAX_SEQ_LEN) for _ in range(num_seqs)]
     kv_lens[-1] = MAX_SEQ_LEN
@@ -80,10 +89,8 @@ def benchmark_prefill(
     kv_cache = torch.randn(size=kv_cache_shape, dtype=dtype)
     k_scale = v_scale = 1.0
 
-    if kv_cache_dtype.startswith("fp8"):
+    if kv_cache_dtype == FP8_DTYPE:
         kv_cache, _ = to_float8(kv_cache)
-
-    output_trtllm = torch.empty(q.shape, dtype=dtype)
 
     kv_indptr = [0]
     kv_indices = []
@@ -103,8 +110,6 @@ def benchmark_prefill(
     kv_indices = torch.tensor(kv_indices, dtype=torch.int32)
     kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32)
 
-    output_baseline = torch.empty(q.shape, dtype=dtype)
-
     wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
         workspace_buffer, kv_layout
     )
@@ -120,7 +125,7 @@ def benchmark_prefill(
         causal=True,
         sm_scale=sm_scale,
         q_data_type=dtype,
-        kv_data_type=kv_cache.dtype,
+        kv_data_type=kv_cache_dtype,
     )
 
     def time_fn(fn, warmup=10, trials=20):
@@ -139,13 +144,13 @@ def benchmark_prefill(
         return sum(times) / len(times), torch.std(torch.tensor(times))
 
     def baseline_prefill():
-        return wrapper.run(
-            q, kv_cache, k_scale=k_scale, v_scale=v_scale, out=output_baseline
-        )
+        return wrapper.run(q, kv_cache, k_scale=k_scale, v_scale=v_scale)
 
     def trt_prefill():
+        out_dtype = "nvfp4" if fused_quant_dtype == FP4_DTYPE else None
+        o_sf_scale = 1.0 if fused_quant_dtype == FP4_DTYPE else None
         return flashinfer.prefill.trtllm_batch_context_with_kv_cache(
-            query=q,
+            query=trtllm_q,
             kv_cache=kv_cache,
             workspace_buffer=workspace_buffer,
             block_tables=block_tables,
@@ -157,7 +162,8 @@ def benchmark_prefill(
             batch_size=num_seqs,
             cum_seq_lens_q=q_indptr,
             cum_seq_lens_kv=kv_indptr,
-            out=output_trtllm,
+            out_dtype=out_dtype,
+            o_sf_scale=o_sf_scale,
         )
 
     trt_mean, trt_std = time_fn(trt_prefill)
@@ -167,8 +173,8 @@ def benchmark_prefill(
     speedup_percent = (baseline_mean - trt_mean) / baseline_mean
 
     print(
-        f"\t{num_seqs}\t{max_seq_len}\t{trt_mean:.5f}\t{trt_std.item():.5f}"
-        f"\t{baseline_mean:.5f}\t{baseline_std.item():.5f}\t{speedup_percent:.5f}"
+        f"\t{num_seqs}\t{max_seq_len}\t{trt_mean:8.3f}\t{trt_std.item():8.3f}"
+        f"\t{baseline_mean:8.3f}\t{baseline_std.item():8.3f}\t{speedup_percent:8.3f}"
     )
 
     # Return results for CSV writing
@@ -180,7 +186,8 @@ def benchmark_prefill(
         "baseline_std": baseline_std.item(),
         "speedup_percent": speedup_percent,
         "q_dtype": str(dtype),
-        "kv_cache_dtype": kv_cache_dtype,
+        "kv_cache_dtype": str(kv_cache_dtype),
+        "fused_quant_dtype": str(fused_quant_dtype),
         "page_size": page_size,
         "num_kv_heads": num_kv_heads,
         "head_dim": head_dim,
@@ -203,6 +210,7 @@ def write_results_to_csv(results, filename=None):
         "speedup_percent",
         "q_dtype",
         "kv_cache_dtype",
+        "fused_quant_dtype",
         "page_size",
         "num_kv_heads",
         "head_dim",
@@ -242,7 +250,41 @@ if __name__ == "__main__":
                 bs,
                 max_seq_len,
                 dtype=torch.bfloat16,
-                kv_cache_dtype="auto",
+                kv_cache_dtype=torch.bfloat16,
+            )
+            all_results.append(result)
+
+    print("Running benchmark for q_dtype = fp8, kv_cache_dtype: fp8, output_dtype: fp8")
+    print(
+        "\tnum_seqs\tmax_seq_len\ttrt_mean\ttrt_std\tbaseline_mean\t"
+        "baseline_std\tspeedup_percent"
+    )
+    for max_seq_len in max_seq_lens:
+        for bs in num_seqs:
+            result = benchmark_prefill(
+                bs,
+                max_seq_len,
+                dtype=torch.bfloat16,
+                kv_cache_dtype=FP8_DTYPE,
+                fused_quant_dtype=FP8_DTYPE,
+            )
+            all_results.append(result)
+
+    print(
+        "Running benchmark for q_dtype = fp8, kv_cache_dtype: fp8, output_dtype: nvfp4"
+    )
+    print(
+        "\tnum_seqs\tmax_seq_len\ttrt_mean\ttrt_std\tbaseline_mean\t"
+        "baseline_std\tspeedup_percent"
+    )
+    for max_seq_len in max_seq_lens:
+        for bs in num_seqs:
+            result = benchmark_prefill(
+                bs,
+                max_seq_len,
+                dtype=torch.bfloat16,
+                kv_cache_dtype=FP8_DTYPE,
+                fused_quant_dtype=FP4_DTYPE,
             )
             all_results.append(result)
 

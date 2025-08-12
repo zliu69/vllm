@@ -13,14 +13,20 @@ from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
 from flashinfer.decode import (_get_range_buf, get_seq_lens,
                                trtllm_batch_decode_with_kv_cache)
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
+from flashinfer.utils import FP4Tensor
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
-from vllm.config import VllmConfig
+from vllm.attention.layer import Attention
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
+from vllm.platforms import current_platform
 from vllm.utils import cdiv, is_pin_memory_available
-from vllm.utils.flashinfer import use_trtllm_attention
+from vllm.utils.flashinfer import (support_trtllm_attention,
+                                   use_trtllm_attention)
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -34,6 +40,9 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
+
+FP8_DTYPE = current_platform.fp8_dtype()
+FP4_DTYPE = torch.uint8
 
 logger = init_logger(__name__)
 
@@ -218,6 +227,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # TODO: discard this for trtllm-gen backend
         self.global_hyperparameters = infer_global_hyperparameters(
             get_per_layer_parameters(vllm_config, layer_names, FlashInferImpl))
+
+        # Layers that shared the same kv cache group, their fusion status
+        # should be the same
+        self.fused_quant: Optional[bool] = None
+        for layer_name, attn_layer in get_layers_from_vllm_config(
+                vllm_config, Attention, layer_names).items():
+            if self.fused_quant is None:
+                self.fused_quant = attn_layer.fused_quant
+            else:
+                assert self.fused_quant == attn_layer.fused_quant
 
         # Preparing persistent buffers (device-side)
         self.paged_kv_indptr = torch.zeros(max_num_reqs + 1,
@@ -523,14 +542,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_kv_heads = self.kv_cache_spec.num_kv_heads
         head_dim = self.kv_cache_spec.head_size
 
-        # currently prefill trtllm attention does not support fp8 kv cache
-        prefill_use_trtllm = not cache_dtype.startswith("fp8") \
-                                and use_trtllm_attention(
-                                num_prefill_tokens, max_seq_len, cache_dtype,
-                                num_qo_heads, num_kv_heads, head_dim)
+        # When Attn+Quant happens, we also insert another Quant for query input.
+        # Refer to QuantAttentionQuantPattern for more details.
+        q_data_type = self.vllm_config.model_config.dtype
+        if self.fused_quant:
+            q_data_type = FP8_DTYPE
+
+        prefill_use_trtllm = use_trtllm_attention(
+            num_qo_heads, num_kv_heads, num_prefill_tokens, max_seq_len,
+            cache_dtype, is_prefill=True, fused_quant=self.fused_quant)
         decode_use_trtllm = use_trtllm_attention(
-                                num_decode_tokens, max_seq_len, cache_dtype,
-                                num_qo_heads, num_kv_heads, head_dim)
+            num_qo_heads, num_kv_heads, num_decode_tokens, max_seq_len,
+            cache_dtype, is_prefill=False, fused_quant=self.fused_quant)
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -544,7 +567,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             head_dim=head_dim,
             page_size=page_size,
             kv_data_type=kv_cache_dtype,
-            q_data_type=self.vllm_config.model_config.dtype,
+            q_data_type=q_data_type,
             slot_mapping=common_attn_metadata.slot_mapping,
             max_q_len=max_q_len,
             max_seq_len=max_seq_len,
@@ -622,6 +645,8 @@ class FlashInferImpl(AttentionImpl):
             self.sliding_window = (-1, -1)
         else:
             self.sliding_window = (sliding_window - 1, 0)
+        self.window_left = (self.sliding_window[0]
+                            if self.sliding_window is not None else -1)
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
@@ -647,6 +672,26 @@ class FlashInferImpl(AttentionImpl):
                                  f"{sinks.dtype}.")
             self.sinks = sinks
 
+        self.support_trtllm_attn = support_trtllm_attention(num_heads,
+                                                            num_kv_heads)
+
+    def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
+                                     group_shape: GroupShape):
+        supported_quant_type = ((dtype == FP8_DTYPE and static and
+                                 group_shape == GroupShape.PER_TENSOR)
+                                 or (dtype == FP4_DTYPE))
+        return (self.support_trtllm_attn
+                and self.kv_cache_dtype.startswith("fp8")
+                and supported_quant_type)
+
+    def insert_query_quant_supported(self, dtype: torch.dtype, static: bool,
+                                       group_shape: GroupShape):
+        supported_quant_type = (dtype == FP8_DTYPE and static and
+                                group_shape == GroupShape.PER_TENSOR)
+        return (self.support_trtllm_attn
+                and self.kv_cache_dtype.startswith("fp8")
+                and supported_quant_type)
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -657,6 +702,7 @@ class FlashInferImpl(AttentionImpl):
         attn_metadata: FlashInferMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_scale_factor: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashInfer.
 
@@ -675,14 +721,40 @@ class FlashInferImpl(AttentionImpl):
         """
         assert output is not None, "Output tensor must be provided."
 
-        if output_scale is not None:
-            raise NotImplementedError(
-                "fused output quantization is not yet supported"
-                " for FlashInferImpl")
-
         if attn_metadata is None:
             # Profiling run.
             return output
+
+        trtllm_fused_quant_dtype: Optional[torch.dtype] = None
+        if output_scale is not None:
+            assert layer.fused_quant, \
+                "Passed output_scale but the attn is not fused"
+            assert query.dtype == FP8_DTYPE, \
+                "query must be quantized when the attn fusion applied"
+            assert attn_metadata.q_data_type == FP8_DTYPE, \
+                "query must be quantized when the attn fusion applied"
+
+            assert (attn_metadata.prefill_use_trtllm and
+                    attn_metadata.decode_use_trtllm), "Must use TRT-LLM attn"
+            assert layer._o_scale_float is not None, \
+                "Host o_scale_float should not be None"
+
+            if output.dtype == FP8_DTYPE:
+                assert output_scale_factor is None, \
+                    "output_scale_factor must not be passed "\
+                    "when the output dtype is FP8"
+                trtllm_fused_quant_dtype = FP8_DTYPE
+            elif output.dtype == FP4_DTYPE:
+                assert output_scale_factor is not None, \
+                    "output_scale_factor must be passed "\
+                    "when the output dtype is NVFP4"
+                trtllm_fused_quant_dtype = FP4_DTYPE
+            else:
+                raise ValueError(
+                    f"Not supported quantized output dtype: {output.dtype}")
+        elif output_scale_factor is not None:
+            raise ValueError("output_scale_factor is not supported "
+                             "when output_scale is not passed")
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
@@ -721,9 +793,6 @@ class FlashInferImpl(AttentionImpl):
                     self.kv_cache_dtype)
                 kv_cache = kv_cache.view(torch_dtype)
 
-        window_left = (self.sliding_window[0]
-                       if self.sliding_window is not None else -1)
-
         # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]
         output_padded = output
@@ -740,6 +809,16 @@ class FlashInferImpl(AttentionImpl):
 
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
         kv_cache_permute = kv_cache.permute(*stride_order)
+
+        # scale for trtllm attn
+        bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
+        bmm2_scale = layer._v_scale_float
+        o_sf_scale: Optional[float] = None
+        if trtllm_fused_quant_dtype == FP8_DTYPE:
+            bmm2_scale = bmm2_scale / layer._o_scale_float
+        elif trtllm_fused_quant_dtype == FP4_DTYPE:
+            o_sf_scale = 1 / layer._o_scale_float
+
         # Regular attention (common case).
         # Decodes are at the front and prefills are at the back,
         # according to reorder_batch()
@@ -751,7 +830,7 @@ class FlashInferImpl(AttentionImpl):
 
             if not attn_metadata.prefill_use_trtllm:
                 assert prefill_wrapper._causal
-                assert prefill_wrapper._window_left == window_left
+                assert prefill_wrapper._window_left == self.window_left
                 assert prefill_wrapper._logits_soft_cap == (
                     self.logits_soft_cap or 0.0)
                 assert prefill_wrapper._sm_scale == self.scale
@@ -778,6 +857,15 @@ class FlashInferImpl(AttentionImpl):
                 assert block_tables_prefill.is_contiguous()
                 assert seq_lens_prefill.is_contiguous()
 
+                if trtllm_fused_quant_dtype == FP8_DTYPE:
+                    out = output[num_decode_tokens:]
+                elif trtllm_fused_quant_dtype == FP4_DTYPE:
+                    out = FP4Tensor(
+                        data=output[num_decode_tokens:],
+                        scale=output_scale_factor,
+                        scale_start_index=num_decode_tokens,
+                        original_shape=prefill_query.shape)
+
                 trtllm_batch_context_with_kv_cache(
                     query=prefill_query,
                     kv_cache=kv_cache_permute,
@@ -786,14 +874,15 @@ class FlashInferImpl(AttentionImpl):
                     seq_lens=seq_lens_prefill,
                     max_q_len=attn_metadata.max_q_len,
                     max_kv_len=attn_metadata.max_seq_len,
-                    bmm1_scale=layer._k_scale_float * self.scale,
-                    bmm2_scale=layer._v_scale_float,
+                    bmm1_scale=bmm1_scale,
+                    bmm2_scale=bmm2_scale,
                     batch_size=attn_metadata.num_prefills,
                     cum_seq_lens_q=attn_metadata.qo_indptr_gpu,
                     cum_seq_lens_kv=attn_metadata.paged_kv_indptr_gpu,
-                    window_left=window_left,
+                    window_left=self.window_left,
                     sinks=self.sinks,
-                    out=output[num_decode_tokens:],
+                    o_sf_scale=o_sf_scale,
+                    out=out,
                 )
 
         if num_decode_tokens > 0:
@@ -803,7 +892,7 @@ class FlashInferImpl(AttentionImpl):
             assert decode_wrapper is not None
 
             if not attn_metadata.decode_use_trtllm:
-                assert decode_wrapper._window_left == window_left
+                assert decode_wrapper._window_left == self.window_left
                 assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
                                                            or 0.0)
                 assert decode_wrapper._sm_scale == self.scale
@@ -818,8 +907,8 @@ class FlashInferImpl(AttentionImpl):
                 # decode_query may be non-contiguous
                 decode_query = decode_query.contiguous()
                 workspace_buffer = decode_wrapper._float_workspace_buffer
-                block_tables_decode = attn_metadata.block_table_tensor[:
-                                                                       num_decode_tokens]
+                block_tables_decode = attn_metadata.\
+                        block_table_tensor[:num_decode_tokens]
                 seq_lens_decode = attn_metadata.seq_lens[:num_decode_tokens]
 
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
@@ -830,6 +919,15 @@ class FlashInferImpl(AttentionImpl):
                 assert block_tables_decode.is_contiguous()
                 assert seq_lens_decode.is_contiguous()
 
+                if trtllm_fused_quant_dtype == FP8_DTYPE:
+                    out = output[:num_decode_tokens]
+                elif trtllm_fused_quant_dtype == FP4_DTYPE:
+                    out = FP4Tensor(
+                        data=output[:num_decode_tokens],
+                        scale=output_scale_factor,
+                        scale_start_index=0,
+                        original_shape=decode_query.shape)
+
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
                     kv_cache=kv_cache_permute,
@@ -837,11 +935,12 @@ class FlashInferImpl(AttentionImpl):
                     block_tables=block_tables_decode,
                     seq_lens=seq_lens_decode,
                     max_seq_len=attn_metadata.max_seq_len,
-                    bmm1_scale=layer._k_scale_float * self.scale,
-                    bmm2_scale=layer._v_scale_float,
-                    window_left=window_left,
+                    bmm1_scale=bmm1_scale,
+                    bmm2_scale=bmm2_scale,
+                    window_left=self.window_left,
                     sinks=self.sinks,
-                    out=output[:num_decode_tokens],
+                    o_sf_scale=o_sf_scale,
+                    out=out,
                 )
         return output_padded
 
