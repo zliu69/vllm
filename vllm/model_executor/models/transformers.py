@@ -33,6 +33,7 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -427,6 +428,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             )
 
         self.pipeline_parallel()
+        self.fused_moe()
         self.tensor_parallel()
 
         # Input embeddings
@@ -499,6 +501,13 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             # Modules that should be on last rank
             if not self.pp_group.is_last_rank:
                 setattr(self.model, name, PPMissingLayer())
+
+    def fused_moe(self):
+        """
+        Substitute the model's MoE layers with vLLM's FusedMoE.
+        To be overridden by child classes if they support MoE.
+        """
+        pass
 
     def tensor_parallel(self):
         """
@@ -625,6 +634,57 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+class TransformersMoEBase(TransformersBase):
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.model_config.get_num_experts(),
+            # num_redundant_experts=self.num_redundant_experts,
+        )
+
+    def fused_moe(self):
+
+        def _fused_moe(module: nn.Module, prefix: str = ""):
+            for child_name, child_module in module.named_children():
+                qual_name = maybe_prefix(prefix, child_name)
+                if (child_name == "experts"
+                        and isinstance(child_module, nn.ModuleList)):
+                    new_module = FusedMoE(
+                        # num_experts=self.text_config.num_experts,
+                        num_experts=self.model_config.get_num_experts(),
+                        top_k=8,  # TODO: set this properly
+                        hidden_size=self.text_config.hidden_size,
+                        intermediate_size=768,  # TODO: set this properly
+                        # params_dtype
+                        # reduce_results
+                        # renormalize
+                        # use_grouped_topk
+                        # num_expert_group
+                        # topk_group
+                        quant_config=self.quant_config,
+                        prefix=qual_name,
+                        # custom_routing_function
+                        # scoring_func
+                        # e_score_correction_bias
+                        # apply_router_weight_on_input
+                        # activation
+                        # enable_eplb
+                        # num_redundant_experts
+                        # has_bias
+                    )
+                    setattr(module, child_name, new_module)
+                    log_replacement(qual_name, child_module, new_module)
+                else:
+                    _fused_moe(child_module, prefix=qual_name)
+
+        _fused_moe(self.model)
+
+
 @support_torch_compile
 class TransformersModel(TransformersBase):
     hf_to_vllm_mapper = WeightsMapper(
@@ -635,6 +695,11 @@ class TransformersModel(TransformersBase):
             "model.model.": "model.",
             "model.score": "score",
         })
+
+
+@support_torch_compile
+class TransformersMoEModel(TransformersMoEBase, TransformersModel):
+    pass
 
 
 @support_torch_compile
@@ -675,6 +740,11 @@ class TransformersForCausalLM(TransformersBase):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
+
+
+@support_torch_compile
+class TransformersMoEForCausalLM(TransformersMoEBase, TransformersForCausalLM):
+    pass
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -799,3 +869,12 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
             inputs_embeds = inputs_embeds.masked_scatter(
                 mask, multimodal_embeddings)
         return inputs_embeds
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MultiModalProcessor,
+    info=MultiModalProcessingInfo,
+    dummy_inputs=MultiModalDummyInputsBuilder)
+class TransformersMoEForMultimodalLM(TransformersMoEForCausalLM,
+                                     TransformersForMultimodalLM):
+    pass
