@@ -672,6 +672,26 @@ def determine_expert_map(
     return (local_num_experts, expert_map)
 
 
+def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
+    """
+        Compresses the expert map by removing any -1 entries.
+
+        Args:
+            expert_map (torch.Tensor): A tensor of shape (global_num_experts,)
+                mapping from global to local index. Contains -1 for experts not
+                assigned to the current rank.
+
+        Returns:
+            str: A string mapping from global to local index.
+                Using str to support hashing for logging once only.
+        """
+    global_indices = torch.where(expert_map != -1)[0]
+    local_indices = expert_map[global_indices]
+    return ", ".join(
+        f"{global_index.item()}->{local_index.item()}"
+        for global_index, local_index in zip(global_indices, local_indices))
+
+
 class FusedMoE(torch.nn.Module):
     """FusedMoE layer for MoE models.
 
@@ -777,6 +797,12 @@ class FusedMoE(torch.nn.Module):
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts)
+            logger.info_once(
+                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
+                " number of experts: %s/%s. Experts global to local index map:"
+                " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
+                self.global_num_experts,
+                get_compressed_expert_map(self.expert_map))
         else:
             self.local_num_experts, self.expert_map = (self.global_num_experts,
                                                        None)
