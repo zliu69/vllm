@@ -189,7 +189,6 @@ def test_eagle_correctness(
 
         ref_llm = LLM(model=model_name,
                       max_model_len=2048,
-                      gpu_memory_utilization=0.8,
                       tensor_parallel_size=tp_size)
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
@@ -200,7 +199,6 @@ def test_eagle_correctness(
             model=model_name,
             trust_remote_code=True,
             tensor_parallel_size=tp_size,
-            gpu_memory_utilization=0.8,
             speculative_config={
                 "method": method,
                 "model": spec_model_name,
