@@ -38,6 +38,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              RWConfig, SpeculatorsConfig,
                                              Step3TextConfig, Step3VLConfig,
                                              UltravoxConfig)
+
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
@@ -65,7 +66,6 @@ def _get_hf_token() -> Optional[str]:
     if token and token.strip():
         return token
     return None
-
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
@@ -280,12 +280,11 @@ def thinker_uses_mrope(config: PretrainedConfig) -> bool:
 
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
     """Detect if the model with this config is used as an encoder/decoder."""
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None:
+        return is_encoder_decoder(text_config)
 
-    def _is_encoder_decoder(config: PretrainedConfig) -> bool:
-        return getattr(config, "is_encoder_decoder", False)
-
-    return (_is_encoder_decoder(config)
-            or _is_encoder_decoder(config.get_text_config()))
+    return getattr(config, "is_encoder_decoder", False)
 
 
 def is_interleaved(config: PretrainedConfig) -> bool:
@@ -299,21 +298,13 @@ def is_interleaved(config: PretrainedConfig) -> bool:
     return False
 
 
-def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
-    """
-    Update kwargs for AutoConfig initialization based on model_type
-    """
-    if model_type in _AUTO_CONFIG_KWARGS_OVERRIDES:
-        kwargs.update(_AUTO_CONFIG_KWARGS_OVERRIDES[model_type])
-    return kwargs
-
-
 def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     """Remap config attributes to match the expected names."""
     for old_attr, new_attr in _CONFIG_ATTRS_MAPPING.items():
         if hasattr(config, old_attr):
             if not hasattr(config, new_attr):
                 config.update({new_attr: getattr(config, old_attr)})
+            delattr(config, old_attr)
             logger.debug("Remapped config attribute '%s' to '%s'", old_attr,
                          new_attr)
     return config
@@ -424,14 +415,15 @@ def get_config(
             )
         else:
             try:
-                kwargs = _maybe_update_auto_config_kwargs(
-                    kwargs, model_type=model_type)
                 config = AutoConfig.from_pretrained(
                     model,
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
                     token=_get_hf_token(),
+                    # some old custom model's config needs
+                    # `has_no_defaults_at_init=True` to work.
+                    has_no_defaults_at_init=trust_remote_code,
                     **kwargs,
                 )
             except ValueError as e:
@@ -925,3 +917,30 @@ def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> int:
             exc_info=e)
 
     return max_position_embeddings
+
+
+def get_hf_file_bytes(file_name: str,
+                      model: Union[str, Path],
+                      revision: Optional[str] = 'main') -> Optional[bytes]:
+    file_path = try_get_local_file(model=model,
+                                   file_name=file_name,
+                                   revision=revision)
+
+    if file_path is None:
+        try:
+            hf_hub_file = hf_hub_download(model,
+                                          file_name,
+                                          revision=revision,
+                                          token=_get_hf_token())
+            file_path = Path(hf_hub_file)
+        except Exception:
+            return None
+
+    if file_path is not None and file_path.is_file():
+        try:
+            with open(file_path, 'rb') as file:
+                return file.read()
+        except Exception:
+            return None
+
+    return None
