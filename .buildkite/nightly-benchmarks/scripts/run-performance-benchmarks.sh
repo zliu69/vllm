@@ -405,7 +405,8 @@ run_serving_tests() {
 
       # pass the tensor parallel size to the client so that it can be displayed
       # on the benchmark dashboard
-      client_command="vllm bench serve \
+      #client_command="vllm bench serve \
+      client_command="python3 benchmark_serving.py \
         --save-result \
         --result-dir $RESULTS_FOLDER \
         --result-filename ${new_test_name}.json \

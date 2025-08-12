@@ -42,6 +42,11 @@ RUN git clone --depth=1 https://github.com/vllm-project/vllm-gaudi /workspace/vl
 WORKDIR /workspace/vllm-gaudi
 RUN python -m pip install -e .
 
+# Work around Triton API change for Gaudi path
+RUN pip uninstall -y triton pytorch-triton || true && \
+    pip install 'triton==3.1.0'
+
+
 # Default to interactive shell
 ENTRYPOINT ["/bin/bash"]
 
