@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, cast
 
 import torch
 from compressed_tensors.config import (CompressionFormat,
@@ -11,6 +12,10 @@ from compressed_tensors.config import (CompressionFormat,
 from compressed_tensors.quantization import (QuantizationArgs,
                                              QuantizationStrategy,
                                              QuantizationType)
+from compressed_tensors.transform import (TransformArgs, TransformBase,
+                                          TransformConfig, TransformFactory,
+                                          TransformLocation, TransformScheme,
+                                          apply_transform_weight)
 from pydantic import BaseModel
 
 import vllm.envs as envs
@@ -31,11 +36,16 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    find_matched_target, is_activation_quantization_format,
+    find_matched_target, is_activation_quantization_format, is_match,
     should_ignore_layer)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported)
+from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.parameter import ShardedModelWeightParameter
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -60,6 +70,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         sparsity_ignore_list: list[str],
         kv_cache_scheme: Optional[dict[str, Any]] = None,
         config: Optional[dict[str, Any]] = None,
+        transform_config: Optional[TransformConfig] = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -70,6 +81,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.sparsity_scheme_map = sparsity_scheme_map
         self.sparsity_ignore_list = sparsity_ignore_list
         self.config = config
+
+        self.transform_config = TransformConfig.model_validate(
+            transform_config)
+        self.transform_factories: dict[int, TransformFactory] = {}
 
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
@@ -111,8 +126,12 @@ class CompressedTensorsConfig(QuantizationConfig):
             return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            # TODO: return a "UnquantizedTransformScheme | QutlassScheme | FWHTScheme"
             if scheme is None:
-                return UnquantizedLinearMethod()
+                # transform schcmes have been attached by get_scheme
+                return CompressedTensorsUnquantizedLinearMethod(self)
+            else:
+                raise ValueError()
             layer.scheme = scheme
             return CompressedTensorsLinearMethod(self)
         if isinstance(layer, Attention):
@@ -129,6 +148,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             config=config)
         sparsity_scheme_map, sparsity_ignore_list = cls._parse_sparsity_config(
             config=config)
+        transform_config = config.get("transform_config")
 
         return cls(
             target_scheme_map=target_scheme_map,
@@ -137,6 +157,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             sparsity_scheme_map=sparsity_scheme_map,
             sparsity_ignore_list=sparsity_ignore_list,
             config=config,
+            transform_config=transform_config,
         )
 
     @classmethod
@@ -476,6 +497,10 @@ class CompressedTensorsConfig(QuantizationConfig):
                    layer: torch.nn.Module,
                    layer_name: Optional[str] = None
                    ) -> Optional["CompressedTensorsScheme"]:
+
+        # This will get a cutlass scheme if applicable
+        # if quantized + transform, attach the scheme like normal but get a
+        # TransformedLinearMethod which subclasses/wraps CTLinearMethod
         """
         compressed-tensors supports non uniform in the following way:
 
@@ -520,6 +545,72 @@ class CompressedTensorsConfig(QuantizationConfig):
                 targets=sparsity_targets,
                 fused_mapping=self.packed_modules_mapping)
             sparsity_scheme = self.sparsity_scheme_map[matched_target]
+
+        def replace_with_check(original, new):
+            if new and original:
+                raise ValueError(
+                    "The provided compressed tensors config has overlapping "
+                    f"config groups for the layer {layer_name}")
+
+            return new or original
+
+        def get_shard_id_of_matches(layer_name, targets, fused):
+            if fused is not None:
+                for fused_suffix in fused:
+                    if name.endswith(fused_suffix):
+                        name_stripped = name.removesuffix(fused_suffix)
+                        return any(
+                            _match_name(name_stripped + shard_suffix, target)
+                            for shard_suffix in fused[fused_suffix])
+
+        input_tfm = None
+        output_tfm = None
+        if self.transform_config is not None:
+            for name, scheme in self.transform_config.config_groups.items():
+                for args in scheme.apply:
+                    if is_match(layer_name,
+                                layer,
+                                args.targets,
+                                args.ignore,
+                                fused=self.packed_modules_mapping):
+
+                        shard_ids = set()
+                        for ending in self.packed_modules_mapping:
+                            if layer_name.endswith(ending):
+                                for shard_id, shard_ending in enumerate(
+                                        self.packed_modules_mapping[ending]):
+                                    thing = layer_name.removesuffix(
+                                        ending) + shard_ending
+                                    if is_match(thing, layer, args.targets,
+                                                args.ignore):
+                                        print(
+                                            f"matched {thing} {args.targets}")
+                                        shard_ids.add(shard_id)
+                                    else:
+                                        print(
+                                            f"NO matched {thing} {args.targets}"
+                                        )
+
+                        if len(shard_ids) == 0:
+                            shard_ids.add(0)
+
+                        if args.location == TransformLocation.INPUT:
+                            input_tfm = replace_with_check(
+                                input_tfm, (name, scheme, args, shard_ids))
+                        if args.location == TransformLocation.OUTPUT:
+                            output_tfm = replace_with_check(
+                                output_tfm, (name, scheme, args, shard_ids))
+
+        # attach transforms for later retrieval by LinearMethod, or
+        if not hasattr(layer, "input_tfm"):
+            layer.input_tfm = []
+        if not hasattr(layer, "output_tfm"):
+            layer.output_tfm = []
+        if input_tfm is not None:
+            layer.input_tfm.append(input_tfm)
+        if output_tfm is not None:
+            layer.output_tfm.append(output_tfm)
+        layer.layer_name = layer_name
 
         if self.supports_cutlass_24(weight_quant=weight_quant,
                                     input_quant=input_quant,
@@ -637,6 +728,192 @@ class CompressedTensorsConfig(QuantizationConfig):
         return weight_quant.num_bits == input_quant.num_bits == 8
 
 
+registry = {}
+
+
+class vllmTransformBase(torch.nn.Module):  # InternalModule
+
+    def __init__(self, scheme: TransformScheme, args: TransformArgs, shard_ids,
+                 layer: torch.nn.Module, weight_loader: Callable, name: str,
+                 input_size_per_partition, output_partition_sizes, asdf_args):
+        super().__init__()
+        self.scheme = scheme
+        self.args = args
+
+        if isinstance(layer, LinearBase):
+            self.module_type = torch.nn.Linear
+        elif isinstance(layer, VocabParallelEmbedding):
+            self.module_type = torch.nn.Embedding
+        else:
+            raise ValueError(layer.__mro__)
+
+        # NOTE: weight size might not be what you think
+        # For example, fused up_gate is actually a different shape
+        # prob need to use output_partition_sizes, input_size_per_partition
+        # if input size, use (input_size_per_partition, input_size_per_partition)
+
+        # Maybe parameter with multiple data? It's one parameter, so the weight loader will choose it for loading
+        # but it has mutliple data, which can be shared tensors
+
+        # trying to create multiple parameters for a fused layer seems like a bad time
+        # and might require having to edit the weight loader of every model
+
+        # at runtime, we can detect if the multiple data are identical, if so save some computation
+        # otherwise, do some slicing and perform ops in linear.
+
+        # Since I think the weight loading is as optimal as it can get, we can consider optimizing the application later
+
+        # we could potentially replace this with a "fake" weight, whose weight loader
+        # is actually a bait and switch to load shards into real weights
+        # essentially bringing this logic out of the parameter. Nicer typing this way
+        self.weight = ShardedModelWeightParameter()
+
+        #for shard_id, output_shape in enumerate(output_partition_sizes):
+        print(shard_ids)
+        for shard_id in shard_ids:
+            output_shape = output_partition_sizes[shard_id]
+            # SHARD_ID is not correct. Need some way of mapping between shard_id used by mapping ("q", "k", "v")
+            # and the shard id of this layer. Doesn't seem like this layer has it, so I think I need to assume the ordering of q, k, v.
+            # At load time, just enforce an ordering of q = 0, k = 1, v = 2
+
+            if isinstance(layer, LinearBase):
+                assert hasattr(layer, "weight")
+                if args.location == TransformLocation.INPUT:
+                    # there's an optimization to be done if the input tensors are exactly the same
+                    # also stacking
+                    weight_shape = (input_size_per_partition,
+                                    input_size_per_partition)
+
+                elif args.location == TransformLocation.OUTPUT:
+                    weight_shape = (output_shape, output_shape)
+
+                else:
+                    raise ValueError()
+
+            elif isinstance(layer, VocabParallelEmbedding):
+                raise ValueError()
+
+            else:
+                raise ValueError()
+
+            # TODO: do not create if args are not targeting this shard
+            key = (id(scheme), weight_shape, )
+            if key not in registry:
+                registry[key] = torch.eye(  # TODO: change back to empty
+                    weight_shape[0],
+                    dtype=scheme.precision,
+                    device=layer.weight.device,
+                    #dtype=asdf_args.get("params_dtype"),
+                )
+
+            p = torch.nn.Parameter(
+                data=registry[key],
+                #input_dim=1,
+                #output_dim=0,
+                #weight_loader=default_weight_loader
+                requires_grad=False,
+            )
+
+            # TODO: use set_weight_attrs
+            p.input_dim = 1
+            p.output_dim = 0
+            # p.weight_loader = lambda *args, **kwargs: None
+            p.weight_loader = default_weight_loader
+            #set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+
+            self.weight.shards[shard_id] = p
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        if self.args.location == TransformLocation.INPUT:
+            value
+
+        return apply_transform_weight(self.weight.data, value,
+                                      self.args.location, self.module_type)
+        raise NotImplementedError()
+
+
+class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
+
+    def __init__(self, quantization_config: CompressedTensorsConfig):
+        self.quantization_config = quantization_config
+        self.num_partitions = None
+
+        self.input_transforms = []
+        self.output_transforms = []
+
+    def create_weights(self, layer: torch.nn.Module,
+                       input_size_per_partition: int,
+                       output_partition_sizes: list[int], input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
+                       weight_loader: Callable, **extra_weight_attrs):
+
+        asdf_args = dict(layer=layer,
+                         input_size_per_partition=input_size_per_partition,
+                         output_partition_sizes=output_partition_sizes,
+                         input_size=input_size,
+                         output_size=output_size,
+                         params_dtype=params_dtype,
+                         weight_loader=weight_loader)
+        super().create_weights(**asdf_args, **extra_weight_attrs)
+
+        self.output_partition_sizes = output_partition_sizes
+
+        # for each transform arg applied (module)
+        for attr_name in ("input_tfm", "output_tfm"):
+            for (name, scheme, args, shard_ids) in getattr(layer, attr_name):
+                # the transform module will handle any shards that get sent to it
+                # (up gate), (qkv)
+                transform_name = f"{name}_{args.location}"
+                transform = vllmTransformBase(
+                    scheme, args, shard_ids, layer, weight_loader,
+                    layer.layer_name + f".{name}_{args.location}",
+                    input_size_per_partition, output_partition_sizes,
+                    asdf_args)
+
+                # make sure this checks for duplicates?
+                layer.register_module(transform_name, transform)
+
+                if attr_name == "input_tfm":
+                    self.input_transforms.append(transform)
+                else:
+                    self.output_transforms.append(transform)
+
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+        xs = [x for _ in range(len(self.output_partition_sizes))]
+
+        weight_shards = layer.weight.split(self.output_partition_sizes, dim=0)
+        # TODO: bias shards
+
+        #assert len(self.input_transforms) == 1
+        #assert len(self.output_transforms) == 1
+        for i, weight_shard in enumerate(weight_shards):
+            for transform in self.input_transforms:
+                if i not in transform.weight.shards:
+                    continue
+
+                transform_shard = transform.weight.shards[i]
+                #xs[i] = dispatch_unquantized_gemm()(layer, xs[i].to(transform_shard.dtype), transform_shard, None).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
+                xs[i] = (xs[i].to(transform_shard.dtype) @ transform_shard).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
+
+            assert bias is None
+            xs[i] = dispatch_unquantized_gemm()(layer, xs[i], weight_shard, bias)
+
+            for transform in self.output_transforms:
+                if i not in transform.weight.shards:
+                    continue
+
+                transform_shard = transform.weight.shards[i]
+                # TODO: inverse is hard coded right now
+                #xs[i] = dispatch_unquantized_gemm()(layer, xs[i].to(transform_shard.dtype), transform_shard, None).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
+                xs[i] = (xs[i].to(transform_shard.dtype) @ transform_shard.T).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
+
+        return torch.hstack(xs)
+
+
 class CompressedTensorsLinearMethod(LinearMethodBase):
 
     def __init__(self, quantization_config: CompressedTensorsConfig):
@@ -676,10 +953,31 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
 
         """
 
+        input_transform = None
+        output_transform = None
+        for child in layer.children():
+            if isinstance(child, TransformBase):
+                if child.args.location == TransformLocation.INPUT:
+                    input_transform = child
+
+                if child.args.location == TransformLocation.OUTPUT:
+                    output_transform = child
+
+        if input_transform is not None:
+            x = input_transform(x)
+
         scheme = layer.scheme
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
-        return scheme.apply_weights(layer, x, bias=bias)
+        x = scheme.apply_weights(layer, x, bias=bias)
+
+        if output_transform is not None:
+            x = output_transform(x)
+
+        return x
+
+
+# TODO: need to add a quant method for VocabParallelEmbedding so transforms can apply
 
 
 class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
