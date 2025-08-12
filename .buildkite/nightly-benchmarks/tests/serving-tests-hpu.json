@@ -15,7 +15,7 @@
             "VLLM_PROMPT_BS_BUCKET_STEP": 32,
             "VLLM_PROMPT_SEQ_BUCKET_MAX": 32512,
             "VLLM_PROMPT_SEQ_BUCKET_STEP": 256,
-            "VLLM_SKIP_WARMUP": 0
+            "VLLM_SKIP_WARMUP": true
         },
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
@@ -55,7 +55,7 @@
             "VLLM_PROMPT_BS_BUCKET_STEP": 32,
             "VLLM_PROMPT_SEQ_BUCKET_MAX": 33024,
             "VLLM_PROMPT_SEQ_BUCKET_STEP": 256,
-            "VLLM_SKIP_WARMUP": 0
+            "VLLM_SKIP_WARMUP": true
         },
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3.1-70B-Instruct",
@@ -96,7 +96,7 @@
             "VLLM_PROMPT_BS_BUCKET_STEP": 32,
             "VLLM_PROMPT_SEQ_BUCKET_MAX": 32512,
             "VLLM_PROMPT_SEQ_BUCKET_STEP": 256,
-            "VLLM_SKIP_WARMUP": 0
+            "VLLM_SKIP_WARMUP": true
         },
         "server_parameters": {
             "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
