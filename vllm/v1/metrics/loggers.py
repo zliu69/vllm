@@ -264,6 +264,11 @@ class PrometheusStatLogger(StatLoggerBase):
         self.counter_prefix_cache_hits = make_per_engine(
             counter_prefix_cache_hits, engine_indexes, model_name)
 
+        self.counter_num_tokens_preempted = self._counter_cls(
+            name="vllm:num_tokens_preempted",
+            documentation="Number of tokens from preempted requests",
+            labelnames=labelnames).labels(*labelvalues)
+
         #
         # Counters
         #
@@ -526,6 +531,8 @@ class PrometheusStatLogger(StatLoggerBase):
             iteration_stats.num_prompt_tokens)
         self.counter_generation_tokens[engine_idx].inc(
             iteration_stats.num_generation_tokens)
+        self.counter_num_tokens_preempted.inc(
+            scheduler_stats.num_tokens_preempted)
         self.histogram_iteration_tokens[engine_idx].observe(
             iteration_stats.num_prompt_tokens + \
             iteration_stats.num_generation_tokens)
