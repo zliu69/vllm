@@ -42,7 +42,8 @@ class Mixer2RMSNormGated(CustomOp):
                  full_hidden_size: int,
                  full_n_groups: int,
                  use_rms_norm: bool = True,
-                 eps: float = 1e-6):
+                 eps: float = 1e-6,
+                 params_dtype: torch.dtype = torch.float32):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -55,7 +56,7 @@ class Mixer2RMSNormGated(CustomOp):
         self.use_rms_norm = use_rms_norm
         if self.use_rms_norm:
             # Register norm weight only if we're actually applying RMSNorm
-            self.weight = nn.Parameter(torch.ones(self.per_rank_hidden_size))
+            self.weight = nn.Parameter(torch.ones(self.per_rank_hidden_size, dtype=params_dtype))
             set_weight_attrs(self.weight,
                              {"weight_loader": sharded_weight_loader(0)})
         else:
@@ -244,6 +245,7 @@ class MambaMixer2(CustomOp):
             activation: str = "silu",
             use_rms_norm: bool = True,
             quant_config: Optional[QuantizationConfig] = None,
+            params_dtype: Optional[torch.dtype] = torch.float32,
             prefix: str = "",
             chunk_size: int = -1,  # the chunk size used by v1
     ):
@@ -299,6 +301,7 @@ class MambaMixer2(CustomOp):
             output_size=self.conv_dim,
             bias=use_conv_bias,
             quant_config=None,
+            params_dtype=params_dtype,
         )
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
@@ -311,6 +314,7 @@ class MambaMixer2(CustomOp):
             output_size=intermediate_size + self.conv_dim + self.num_heads,
             bias=use_bias,
             quant_config=quant_config,
+            params_dtype=params_dtype,
         )
 
         # - because in_proj is a concatenation of 3 weights, we
@@ -391,10 +395,11 @@ class MambaMixer2(CustomOp):
         self.A = nn.Parameter(
             torch.empty(
                 divide(num_heads, self.tp_size),
-                dtype=torch.float32,
+                # dtype=torch.float32,
+                dtype=params_dtype
             ))
-        self.D = nn.Parameter(torch.ones(num_heads // self.tp_size))
-        self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size))
+        self.D = nn.Parameter(torch.ones(num_heads // self.tp_size, params_dtype=params_dtype))
+        self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size, params_dtype=params_dtype))
         self.use_rms_norm = use_rms_norm
 
         set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
@@ -410,12 +415,14 @@ class MambaMixer2(CustomOp):
             bias=use_bias,
             input_is_parallel=True,
             quant_config=quant_config,
+            params_dtype=params_dtype,
         )
 
         self.norm = Mixer2RMSNormGated(intermediate_size,
                                        n_groups,
                                        self.use_rms_norm,
-                                       eps=rms_norm_eps)
+                                       eps=rms_norm_eps,
+                                       params_dtype=params_dtype)
 
         if envs.VLLM_USE_V1:
             compilation_config = get_current_vllm_config().compilation_config

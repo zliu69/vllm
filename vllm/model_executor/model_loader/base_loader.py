@@ -35,6 +35,7 @@ class BaseModelLoader(ABC):
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
+                print("### rank: {}, baseloader vllm_config: {}, model_config: {}".format(torch.distributed.get_rank(), vllm_config, model_config))
                 model = initialize_model(vllm_config=vllm_config,
                                          model_config=model_config)
             # Quantization does not happen in `load_weights` but after it

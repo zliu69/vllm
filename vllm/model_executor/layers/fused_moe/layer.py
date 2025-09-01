@@ -56,6 +56,7 @@ elif current_platform.is_cpu():
     pass
 else:
     from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
+from vllm.model_executor.layers.fused_moe.fused_moe import sigmoid_topk
 if current_platform.is_tpu():
     from .moe_pallas import fused_moe as fused_moe_pallas
 else:
@@ -699,7 +700,7 @@ class FusedMoE(torch.nn.Module):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
-        if self.scoring_func != "softmax" and not self.use_grouped_topk:
+        if (self.scoring_func != "softmax" or self.scoring_func != "sigmoid") and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
         if current_platform.is_hpu():
@@ -1203,13 +1204,21 @@ class FusedMoE(torch.nn.Module):
             if indices_type is not None:
                 topk_ids = topk_ids.to(dtype=indices_type)
         elif custom_routing_function is None:
-            topk_weights, topk_ids, token_expert_indices = fused_topk(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
-                indices_type=indices_type,
-            )
+            if scoring_func == "sigmoid":
+                topk_weights, topk_ids = sigmoid_topk(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    topk=top_k,
+                    renormalize=renormalize,
+                )
+            else:
+                topk_weights, topk_ids, token_expert_indices = fused_topk(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    topk=top_k,
+                    renormalize=renormalize,
+                    indices_type=indices_type,
+                )
         else:
             topk_weights, topk_ids = custom_routing_function(
                 hidden_states=hidden_states,

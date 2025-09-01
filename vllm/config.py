@@ -469,17 +469,19 @@ class ModelConfig:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(self.model,
                                                        self.served_model_name)
+        print("### self.served_model_name: {}".format(self.served_model_name))
         self.model = maybe_model_redirect(self.model)
+        print("### self.model: {}".format(self.model))
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
             self.tokenizer = self.model
         if self.tokenizer_revision is None:
             self.tokenizer_revision = self.revision
         self.tokenizer = maybe_model_redirect(self.tokenizer)
-
+        print("### self.tokenizer: {}".format(self.tokenizer))
         if isinstance(self.hf_config_path, str):
             self.hf_config_path = maybe_model_redirect(self.hf_config_path)
-
+        print("### after maybe_model_redirect\n")
         if callable(self.hf_overrides):
             hf_overrides_kw = {}
             hf_overrides_fn = self.hf_overrides
@@ -505,7 +507,7 @@ class ModelConfig:
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         self.maybe_pull_model_tokenizer_for_s3(self.model, self.tokenizer)
-
+        print("### after maybe_pull_model_tokenizer_for_s3\n")
         if (backend := envs.VLLM_ATTENTION_BACKEND
             ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
             raise ValueError(
@@ -527,13 +529,17 @@ class ModelConfig:
             raise ValueError(
                 "Sleep mode is not supported on current platform.")
 
+        print("### before ConfigFormat\n")
+
         if isinstance(self.config_format, str):
             self.config_format = ConfigFormat(self.config_format)
+        
+        print("### before get_config\n")
 
         hf_config = get_config(self.hf_config_path or self.model,
                                self.trust_remote_code, self.revision,
                                self.code_revision, self.config_format)
-
+        print("### hf_config: {}".format(hf_config))
         if hf_overrides_kw:
             logger.debug("Overriding HF config with %s", hf_overrides_kw)
             hf_config.update(hf_overrides_kw)
@@ -559,6 +565,7 @@ class ModelConfig:
             self.truncation_side = "right"
 
         model_info, arch = self.registry.inspect_model_cls(self.architectures)
+        print("### model_info: {} arch: {}".format(model_info, arch))
         self._model_info = model_info
         self._architecture = arch
 

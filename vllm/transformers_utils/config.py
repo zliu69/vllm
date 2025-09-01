@@ -40,7 +40,8 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              NemotronConfig, NVLM_D_Config,
                                              OvisConfig, RWConfig,
                                              SkyworkR1VChatConfig, SolarConfig,
-                                             Telechat2Config, UltravoxConfig)
+                                             Telechat2Config, UltravoxConfig,
+                                             JambaDoEConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
@@ -97,6 +98,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "skywork_chat": SkyworkR1VChatConfig,
     "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
+    "jambadoe": JambaDoEConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
@@ -307,7 +309,14 @@ def get_config(
     **kwargs,
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
-
+    print("### get_config() model: {}, trust_remote_code: {}, revision: {}, code_revision: {}, config_format: {}, kwargs: {}".format(
+        model,
+        trust_remote_code,
+        revision,
+        code_revision,
+        config_format,
+        kwargs,
+    ))
     is_gguf = check_gguf_file(model)
     if is_gguf:
         kwargs["gguf_file"] = Path(model).name
@@ -353,7 +362,7 @@ def get_config(
             token=_get_hf_token(),
             **kwargs,
         )
-
+        print("### get_config config_dict: {}".format(config_dict))
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
         if model_type in _CONFIG_REGISTRY:
