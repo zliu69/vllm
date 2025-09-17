@@ -157,6 +157,7 @@ class JambaDoEConfig(PretrainedConfig):
         mamba_dt_rank="auto",
         mamba_conv_bias=True,
         mamba_proj_bias=False,
+        mamba_chunk_size=256,
         qk_nope_head_dim=128,
         qk_rope_head_dim=64,
         v_head_dim=128,
@@ -226,6 +227,7 @@ class JambaDoEConfig(PretrainedConfig):
         self.mamba_dt_rank = math.ceil(self.hidden_size / 16) if mamba_dt_rank == "auto" else mamba_dt_rank
         self.mamba_conv_bias = mamba_conv_bias
         self.mamba_proj_bias = mamba_proj_bias
+        self.mamba_chunk_size = mamba_chunk_size
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
         self.v_head_dim = v_head_dim

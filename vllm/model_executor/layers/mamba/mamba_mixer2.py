@@ -398,8 +398,8 @@ class MambaMixer2(CustomOp):
                 # dtype=torch.float32,
                 dtype=params_dtype
             ))
-        self.D = nn.Parameter(torch.ones(num_heads // self.tp_size, params_dtype=params_dtype))
-        self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size, params_dtype=params_dtype))
+        self.D = nn.Parameter(torch.ones(num_heads // self.tp_size, dtype=params_dtype))
+        self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size, dtype=params_dtype))
         self.use_rms_norm = use_rms_norm
 
         set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})

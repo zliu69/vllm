@@ -52,6 +52,7 @@ class Attention(nn.Module):
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
+        is_kn_att: Optional[bool] = False,
         **extra_impl_args,
     ) -> None:
         """
@@ -76,6 +77,7 @@ class Attention(nn.Module):
         else:
             kv_cache_dtype = "auto"
             block_size = 16
+            # block_size = 256
             is_attention_free = False
             calculate_kv_scales = False
         if num_kv_heads is None:
@@ -137,10 +139,12 @@ class Attention(nn.Module):
                                         blocksparse_params is not None,
                                         use_mla=use_mla)
         impl_cls = attn_backend.get_impl_cls()
+        print("### Attention impl_cls: {}, is_kn_att: {}, extra_impl_args: {}\n".format(impl_cls, is_kn_att, extra_impl_args))
+        # if isinstance(impl_cls, backends.flash_attn.FlashAttentionImpl)
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params, logits_soft_cap, attn_type,
-                             kv_sharing_target_layer_name, **extra_impl_args)
+                             kv_sharing_target_layer_name, is_kn_att, **extra_impl_args)
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
 
@@ -216,6 +220,7 @@ class Attention(nn.Module):
             # We skip reshaping query, key and value tensors for the MLA
             # backend since these tensors have different semantics and are
             # processed differently.
+            print("### Attention use_direct_call: {}\n".format(self.use_direct_call))
             if not self.use_mla:
                 # Reshape the query, key, and value tensors.
                 # NOTE(woosuk): We do this outside the custom op to minimize the
@@ -391,6 +396,7 @@ def maybe_save_kv_layer_to_connector(
     if attn_metadata is None:
         return
     assert isinstance(attn_metadata, dict)
+    print("### rank: {}, connector: {}, maybe_save_kv_layer_to_connector for layer: {}\n".format(type(connector), torch.distributed.get_rank(), layer_name))
     connector.save_kv_layer(layer_name, kv_cache_layer,
                             attn_metadata[layer_name])
 
@@ -442,13 +448,21 @@ def unified_attention_with_output(
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
 ) -> None:
+    print("### unified_attention_with_output layer_name: {}, q: {}, k: {}, v: {}\n".format(layer_name, query.shape, key.shape, value.shape))
     wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
+    if not torch.cuda.is_current_stream_capturing():
+        print("### unified_attention_with_output forward_context: {}\n".format(forward_context))
     attn_metadata = forward_context.attn_metadata
+    if not torch.cuda.is_current_stream_capturing():
+        print("### unified_attention_with_output attn_metadata: {}\n".format(attn_metadata))
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     self = forward_context.no_compile_layers[layer_name]
+    print("### unified_attention_with_output self: {}\n".format(type(self)))
     kv_cache = self.kv_cache[forward_context.virtual_engine]
+    # if not torch.cuda.is_current_stream_capturing():
+    print("### rank: {}, unified_attention_with_output kv_cache: {}\n".format(torch.distributed.get_rank(), len(kv_cache)))
     self.impl.forward(self,
                       query,
                       key,

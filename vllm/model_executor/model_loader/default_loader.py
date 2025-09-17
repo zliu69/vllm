@@ -145,7 +145,7 @@ class DefaultModelLoader(BaseModelLoader):
                 if pattern == "*.safetensors":
                     use_safetensors = True
                 break
-
+        # print("### _prepare_weights use_safetensors: {}, hf_weights_files: {}\n".format(use_safetensors, hf_weights_files))
         if use_safetensors:
             # For models like Mistral-7B-Instruct-v0.3
             # there are both sharded safetensors files and a consolidated
@@ -161,6 +161,8 @@ class DefaultModelLoader(BaseModelLoader):
                 )
             hf_weights_files = filter_duplicate_safetensors_files(
                 hf_weights_files, hf_folder, index_file)
+            # print("### _prepare_weights hf_weights_files filtered: {}\n".format(hf_weights_files))
+
         else:
             hf_weights_files = filter_files_not_needed_for_inference(
                 hf_weights_files)
@@ -195,6 +197,8 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config.use_tqdm_on_load,
                 )
             else:
+                # print("### _get_weights_iterator use_safetensors: {}\n".format(use_safetensors))
+
                 weights_iterator = safetensors_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
@@ -250,12 +254,12 @@ class DefaultModelLoader(BaseModelLoader):
         )
         yield from self._get_weights_iterator(primary_weights)
 
-        secondary_weights = cast(
-            Iterable[DefaultModelLoader.Source],
-            getattr(model, "secondary_weights", ()),
-        )
-        for source in secondary_weights:
-            yield from self._get_weights_iterator(source)
+        # secondary_weights = cast(
+        #     Iterable[DefaultModelLoader.Source],
+        #     getattr(model, "secondary_weights", ()),
+        # )
+        # for source in secondary_weights:
+        #     yield from self._get_weights_iterator(source)
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model,
@@ -266,17 +270,24 @@ class DefaultModelLoader(BaseModelLoader):
     def load_weights(self, model: nn.Module,
                      model_config: ModelConfig) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
+        print("### rank: {}, load_weights weights_to_load: {}\n".format(torch.distributed.get_rank(), weights_to_load))
         loaded_weights = model.load_weights(
             self.get_all_weights(model_config, model))
         self.counter_after_loading_weights = time.perf_counter()
+        # print(loaded_weights)
         logger.info(
             "Loading weights took %.2f seconds",
             self.counter_after_loading_weights -
             self.counter_before_loading_weights)
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking currently.
+        print("### rank: {}, model_config.quantization: {}, loaded_weights: {}\n".format(torch.distributed.get_rank(), model_config.quantization, loaded_weights))
+
         if model_config.quantization is None and loaded_weights is not None:
             weights_not_loaded = weights_to_load - loaded_weights
             if weights_not_loaded:
                 raise ValueError("Following weights were not initialized from "
                                  f"checkpoint: {weights_not_loaded}")
+
+        print("### rank: {}, load_weights completed\n".format(torch.distributed.get_rank()))
+

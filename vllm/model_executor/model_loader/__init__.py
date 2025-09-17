@@ -24,6 +24,7 @@ from vllm.model_executor.model_loader.utils import (
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
     if isinstance(load_config.load_format, type):
+        print("###  get_model_loader use BaseModelLoader {}\n===".format(load_config.load_format))
         return load_config.load_format(load_config)
 
     if load_config.load_format == LoadFormat.DUMMY:
@@ -46,7 +47,7 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
     if load_config.load_format == LoadFormat.RUNAI_STREAMER_SHARDED:
         return ShardedStateLoader(load_config, runai_model_streamer=True)
-
+    print("###  get_model_loader use DefaultModelLoader ===")
     return DefaultModelLoader(load_config)
 
 
@@ -54,6 +55,7 @@ def get_model(*,
               vllm_config: VllmConfig,
               model_config: Optional[ModelConfig] = None) -> nn.Module:
     loader = get_model_loader(vllm_config.load_config)
+    print("### get_model loader: {}\n".format(type(loader)))
     if model_config is None:
         model_config = vllm_config.model_config
     return loader.load_model(vllm_config=vllm_config,

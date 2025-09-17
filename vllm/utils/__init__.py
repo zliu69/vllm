@@ -2699,8 +2699,10 @@ def bind_kv_cache(
     layer_need_kv_cache = [
         layer_name for layer_name in ctx
         if (hasattr(ctx[layer_name], 'attn_type') and ctx[layer_name].attn_type
-            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER))
+            in (AttentionType.DECODER, ))
+                # AttentionType.ENCODER_DECODER))
     ]
+    print("### rank: {} bind_kv_cache layer_need_kv_cache: {}\n".format(torch.distributed.get_rank(), layer_need_kv_cache))
     layer_index_sorted = sorted(
         set(
             extract_layer_index(layer_name)

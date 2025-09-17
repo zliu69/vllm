@@ -221,7 +221,7 @@ class LLM:
                 # to provide better context to the user.
                 raise ValueError(
                     f"Invalid 'kv_transfer_config' provided: {e}") from e
-
+        print("### llm init kwargs: {}\n".format(kwargs))
         if hf_overrides is None:
             hf_overrides = {}
 
@@ -266,7 +266,7 @@ class LLM:
             compilation_config=compilation_config_instance,
             **kwargs,
         )
-
+        print("### llm init engine_args: {}\n".format(engine_args))
         # Create the Engine (autoselects V0 vs V1)
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args=engine_args, usage_context=UsageContext.LLM_CLASS)
@@ -847,6 +847,7 @@ class LLM:
                     model_config=model_config,
                     **_chat_template_kwargs,
                 )
+                print("### prompt_str: {}\n".format(prompt_str))
                 # Special tokens are already included in chat templates so
                 # should not be added by the tokenizer in this case.
                 prompt_token_ids = tokenizer.encode(prompt_str,

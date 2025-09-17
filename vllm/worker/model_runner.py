@@ -529,6 +529,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             ModelInputForGPUBuilder.InterDataForSeqGroup] = []
 
         self.attn_metadata_builder.prepare()
+        print("### ModelInputForGPUBuilder self.attn_metadata_builder type: {}, num_prefills: {}\n".format(type(self.attn_metadata_builder), self.attn_metadata_builder.num_prefills))
 
     def _compute_lens(self, inter_data: InterDataForSeqGroup, seq_idx: int,
                       seq_group_metadata: SequenceGroupMetadata):
@@ -797,8 +798,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             reinit=True,
             reinit_use_defaults=True,
             encoder_seq_len=encoder_seq_len)
-
+        print("### add_seq_group inter_data: {}\n".format(inter_data))
         self.inter_data_list.append(inter_data)
+        print("### add_seq_group len inter_data_list: {}\n".format(len(self.inter_data_list)))
+        print("### add_seq_group n_seqs: {}\n".format(n_seqs))
 
         for seq_idx in range(n_seqs):
             for per_seq_fn in self.per_seq_compute_fns:
@@ -981,7 +984,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Sequence and query lengths.
         if cuda_graph_pad_size:
             seq_lens.extend(itertools.repeat(1, cuda_graph_pad_size))
-
+        print("### ModelInputForGPUBuilder seq_lens: {}, query_lens: {}, cuda_graph_pad_size: {}, batch_size: {}\n".format(seq_lens, query_lens, cuda_graph_pad_size, batch_size))
         # Attention metadata.
         attn_metadata = self.attn_metadata_builder.build(
             seq_lens, query_lens, cuda_graph_pad_size, batch_size)
@@ -1172,6 +1175,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         with DeviceMemoryProfiler(self.device) as m:
             time_before_load = time.perf_counter()
             self.model = get_model(vllm_config=self.vllm_config)
+            
+            print("### rank: {}, get_model completed, self.lora_config: {}\n".format(torch.distributed.get_rank(), self.lora_config))
+
             if self.lora_config:
                 assert supports_lora(
                     self.model
@@ -1271,7 +1277,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
+        print("### _prepare_model_input_tensors finished_requests_ids: {}\n".format(finished_requests_ids))
         self.builder.prepare(finished_requests_ids)
+        print("### _prepare_model_input_tensors seq_group_metadata_list len: {}\n".format(len(seq_group_metadata_list)))
         for seq_group_metadata in seq_group_metadata_list:
             try:
                 self.builder.add_seq_group(seq_group_metadata)
@@ -1297,6 +1305,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         max_num_batched_tokens = \
             self.scheduler_config.max_num_batched_tokens
         max_num_seqs = self.scheduler_config.max_num_seqs
+        print("### profile_run max_num_batched_tokens: {}, max_num_seqs: {}\n".format(max_num_batched_tokens, max_num_seqs))
         self._dummy_run(max_num_batched_tokens, max_num_seqs)
 
     def _add_dummy_loras(self, num_loras: int) -> list[LoRARequest]:
@@ -1371,6 +1380,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     max_num_seqs = 1
 
             batch_size = 0
+            print("### _dummy_run max_num_seqs: {}\n".format(max_num_seqs))
             for group_id in range(max_num_seqs):
                 seq_len = (max_num_batched_tokens // max_num_seqs +
                            (group_id < max_num_batched_tokens % max_num_seqs))
@@ -1394,6 +1404,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     multi_modal_placeholders,
                 )
                 seqs.append(seq)
+            print("### _dummy_run seqs len : {}\n".format(len(seqs)))
 
             # Run the model with the dummy inputs.
             num_layers = self.model_config.get_num_layers(self.parallel_config)
@@ -1575,6 +1586,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 # product.
                 cudagraph_capture_sizes = self.vllm_config.compilation_config\
                     .cudagraph_capture_sizes
+                print("### capture_model cudagraph_capture_sizes: {}\n".format(cudagraph_capture_sizes))
                 cudagraph_inputs_embeds = ((
                     True, False) if self.model_config.enable_prompt_embeds else
                                            (False, ))
@@ -1588,6 +1600,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         list(compilation_cases),
                         desc="Capturing CUDA graph shapes")
                 for batch_size, use_inputs_embeds in compilation_cases:
+                    print("### capture_model batch_size: {}\n".format(batch_size))
+
                     attn_metadata = (
                         self.attn_state.graph_capture_get_metadata_for_batch(
                             batch_size,
@@ -1783,6 +1797,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         assert model_input.attn_metadata is not None
         prefill_meta = model_input.attn_metadata.prefill_metadata
         decode_meta = model_input.attn_metadata.decode_metadata
+        print("### ModelRunner model_input attn_metadata prefill_metadata: {}\n".format(model_input.attn_metadata.prefill_metadata))
+        print("### ModelRunner model_input attn_metadata decode_metadata: {}\n".format(model_input.attn_metadata.decode_metadata))
         # TODO(andoorve): We can remove this once all
         # virtual engines share the same kv cache.
         virtual_engine = model_input.virtual_engine
@@ -1839,6 +1855,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_start.record()
 
         if not bypass_model_exec:
+            print("### ModelRunner set_forward_context model_input.attn_metadata: {}\n".format(model_input.attn_metadata))
+
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config, virtual_engine):
                 hidden_or_intermediate_states = model_executable(

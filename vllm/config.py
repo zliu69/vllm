@@ -1166,6 +1166,13 @@ class ModelConfig:
                                       == "zamba2"):
             return self.hf_text_config.attention_head_dim
 
+        if hasattr(self.hf_text_config,
+                   "model_type") and (self.hf_text_config.model_type
+                                      == "jambadoe"):
+            # return int((self.hf_text_config.hidden_size //
+            #     self.hf_text_config.num_attention_heads) * 1.5)
+            return 192
+
         if self.is_attention_free:
             return 0
 
@@ -1481,6 +1488,7 @@ class ModelConfig:
 
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
+# BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
 CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
 PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 
@@ -1491,6 +1499,7 @@ class CacheConfig:
     """Configuration for the KV cache."""
 
     block_size: SkipValidation[BlockSize] = None  # type: ignore
+    # block_size: SkipValidation[BlockSize] = 256  # type: ignore
     """Size of a contiguous cache block in number of tokens. This is ignored on
     neuron devices and set to `--max-model-len`. On CUDA devices, only block
     sizes up to 32 are supported. On HPU devices, block size defaults to 128.
@@ -2244,8 +2253,9 @@ class SchedulerConfig:
             self.max_model_len = 8192
 
         if self.max_num_seqs is None:
-            self.max_num_seqs = 128
-
+            # self.max_num_seqs = 128
+            self.max_num_seqs = 1
+        print("### __post_init__ max_num_seqs: {}\n".format(self.max_num_seqs))
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
                 if self.num_scheduler_steps > 1:

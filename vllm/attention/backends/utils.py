@@ -545,6 +545,7 @@ def get_seq_len_block_table_args(
 def get_num_prefill_decode_query_kv_tokens(
     attn_metadata,
     attn_type: str,
+    is_kn_att: Optional[bool] = False,
 ) -> Tuple[int, int, int]:
     """
     Calculate the number of prefill and decode tokens for query, key/value
@@ -573,7 +574,8 @@ def get_num_prefill_decode_query_kv_tokens(
         num_prefill_query_tokens = attn_metadata.num_encoder_tokens
         num_prefill_kv_tokens = attn_metadata.num_encoder_tokens
         num_decode_query_tokens = 0
-    elif attn_type == AttentionType.ENCODER_DECODER:
+    elif attn_type == AttentionType.ENCODER_DECODER and (not is_kn_att):
+        print("### get_num_prefill_decode_query_kv_tokens is_kn_att: {}\n".format(is_kn_att))
         assert attn_metadata.num_encoder_tokens is not None
         num_prefill_query_tokens = attn_metadata.num_prefill_tokens
         # The key is the encoder/cross-attention.

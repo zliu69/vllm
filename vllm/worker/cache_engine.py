@@ -81,7 +81,7 @@ class CacheEngine:
             )
         except (AttributeError, NotImplementedError):
             kv_cache_stride_order = tuple(range(len(kv_cache_generic_shape)))
-
+        print("### rank: {}, _allocate_kv_cache kv_cache_generic_shape: {}, kv_cache_stride_order: {}\n".format(torch.distributed.get_rank(), kv_cache_generic_shape, kv_cache_stride_order))
         # The allocation respects the backend-defined stride order to ensure
         # the semantic remains consistent for each backend. We first obtain the
         # generic kv cache shape and then permute it according to the stride
@@ -101,6 +101,7 @@ class CacheEngine:
 
             # view back to (TOTAL_PAGES, PAGE_SIZE, entry_shape...) for cases
             # when entry_shape is higher than 1D
+            print("### rank: {}, _allocate_kv_cache layer_kv_cache shape: {}\n".format(torch.distributed.get_rank(), layer_kv_cache.shape))
             kv_cache.append(layer_kv_cache)
         return kv_cache
 
@@ -123,11 +124,12 @@ class CacheEngine:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
     ) -> int:
+        print("### get_cache_block_size, model_config: {}, cache_config: {}\n".format(model_config, cache_config))
         head_size = model_config.get_head_size()
         num_heads = model_config.get_num_kv_heads(parallel_config)
         num_attention_layers = model_config.get_num_layers_by_block_type(
             parallel_config, LayerBlockType.attention)
-
+        print("### get_cache_block_size head_size: {}, num_heads: {}, num_attention_layers: {}\n".format(head_size, num_heads, num_attention_layers))
         if cache_config.cache_dtype == "auto":
             dtype = model_config.dtype
         else:
@@ -140,6 +142,8 @@ class CacheEngine:
         value_cache_entry = key_cache_entry if not model_config.use_mla else 0
         total = num_attention_layers * cache_config.block_size * \
             (key_cache_entry + value_cache_entry)
+                
+        print("### get_cache_block_size key_cache_entry: {}, value_cache_entry: {}, total: {}\n".format(key_cache_entry, value_cache_entry, total))
 
         dtype_size = get_dtype_size(dtype)
         return dtype_size * total

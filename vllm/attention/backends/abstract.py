@@ -271,6 +271,7 @@ class AttentionImpl(ABC, Generic[T]):
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
+        is_kn_att: Optional[bool] = False,
     ) -> None:
         raise NotImplementedError
 

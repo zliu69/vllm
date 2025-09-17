@@ -234,7 +234,8 @@ class LLMEngine:
             vllm_config,
             use_cached_outputs,
         )
-
+        print("### llm engine init scheduler_config: {}\n".format(self.scheduler_config))
+        print("### llm engine init cache_config: {}\n".format(self.cache_config))
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
 
@@ -268,6 +269,7 @@ class LLMEngine:
             self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
+        print("### is_usage_stats_enabled(): {}\n".format(is_usage_stats_enabled()))
         if is_usage_stats_enabled():
             from vllm.model_executor.model_loader import (
                 get_architecture_class_name)
@@ -411,7 +413,7 @@ class LLMEngine:
         start = time.time()
         num_gpu_blocks, num_cpu_blocks = (
             self.model_executor.determine_num_available_blocks())
-
+        print("###  _initialize_kv_caches num_gpu_blocks: {}, num_cpu_blocks: {}\n".format(num_gpu_blocks, num_cpu_blocks))
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
             logger.info(
@@ -491,13 +493,15 @@ class LLMEngine:
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
+        print("### from_engine_args engine_args: {}\n".format(engine_args))
         vllm_config = engine_args.create_engine_config(usage_context)
-
+        print("### from_engine_args vllm_config cache_config: {}\n".format(vllm_config.cache_config))
         engine_cls = cls
         if envs.VLLM_USE_V1:
             from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
             engine_cls = V1LLMEngine
-
+        print("### from_engine_args vllm_config: {}\n".format(vllm_config))
+        print("### from_engine_args vllm_config scheduler_config: {}\n".format(vllm_config.scheduler_config))
         return engine_cls.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=usage_context,
@@ -584,7 +588,7 @@ class LLMEngine:
 
         seq = Sequence(seq_id, decoder_inputs, block_size, eos_token_id,
                        lora_request, prompt_adapter_request)
-
+        print("### llm engine _add_processed_request seq: {}\n".format(seq))
         encoder_seq = (None if encoder_inputs is None else Sequence(
             seq_id, encoder_inputs, block_size, eos_token_id, lora_request,
             prompt_adapter_request))

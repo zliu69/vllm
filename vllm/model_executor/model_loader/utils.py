@@ -96,6 +96,9 @@ def initialize_model(
 
 def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
                                   target_device: torch.device) -> None:
+    
+    # print("### rank: {}, target_device: {}, process_weights_after_loading start, model: {}\n".format(torch.distributed.get_rank(), target_device, model))
+
     for _, module in model.named_modules():
         if isinstance(module, QKVCrossParallelLinear):
             # NOTE(Isotr0py): special case for cross QKV layer because
@@ -103,6 +106,7 @@ def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
             module.process_weights_after_loading()
             continue
         quant_method = getattr(module, "quant_method", None)
+        # print("### rank: {}, target_device: {}, module: {}, quant_method: {}\n".format(torch.distributed.get_rank(), target_device, module, quant_method))
         if isinstance(quant_method, QuantizeMethodBase):
             # When quant methods need to process weights after loading
             # (for repacking, quantizing, etc), they expect parameters
@@ -118,9 +122,14 @@ def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
     for _, module in model.named_modules():
         if isinstance(module, Attention) and \
             hasattr(module, "process_weights_after_loading"):
+            # print("### rank: {}, target_device: {}, Attention process_weights_after_loading module: {}\n".format(torch.distributed.get_rank(), target_device, module))
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             module.process_weights_after_loading(model_config.dtype)
+            
+            
+    print("### rank: {}, target_device: {}, process_weights_after_loading completed".format(torch.distributed.get_rank(), target_device))
+
 
 
 @contextmanager

@@ -121,6 +121,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
                 or (rank % self.parallel_config.tensor_parallel_size == 0),
             )
             all_kwargs.append(kwargs)
+        print("### all_kwargs vllm_config before executor init worker: {}\n".format(self.vllm_config))
         self._run_workers("init_worker", all_kwargs)
         self._run_workers("init_device")
         self._run_workers("load_model",

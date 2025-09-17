@@ -999,7 +999,7 @@ def sigmoid_topk(
     # else:
     #     group_scores = scores.view(num_token, num_expert_group,
     #                                -1).max(dim=-1).values  # [n, n_group]
-    experts_scores, experts_idx = torch.topk(scores, k=topk, dim=-1,
+    topk_weights, experts_idx = torch.topk(scores, k=topk, dim=-1,
                            sorted=False)  # [n, top_k]
     # group_mask = torch.zeros_like(group_scores)  # [n, n_group]
     # group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
@@ -1021,7 +1021,7 @@ def sigmoid_topk(
 
     if renormalize:
         # topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-        topk_weights = experts_scores / (experts_scores.sum(dim=-1, keepdim=True) + 1e-20) if topk > 1 else experts_scores
+        topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-20) if topk > 1 else topk_weights
 
     return topk_weights.to(torch.float32), experts_idx.to(torch.int32)
 

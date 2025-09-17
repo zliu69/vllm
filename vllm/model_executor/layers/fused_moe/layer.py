@@ -700,7 +700,7 @@ class FusedMoE(torch.nn.Module):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
-        if (self.scoring_func != "softmax" or self.scoring_func != "sigmoid") and not self.use_grouped_topk:
+        if (self.scoring_func != "softmax" and self.scoring_func != "sigmoid") and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
         if current_platform.is_hpu():
@@ -889,18 +889,22 @@ class FusedMoE(torch.nn.Module):
 
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
-        shard_size = expert_data.shape[shard_dim] // 2
-        loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
-                                             shard_size)
-        # Narrow parameter and load.
-        # w1, gate_proj: Load into first logical weight of w13.
-        if shard_id == "w1":
-            expert_data = expert_data.narrow(shard_dim, 0, shard_size)
-        # w3, up_proj: Load into second logical weight of w13.
+        if expert_data.shape[shard_dim] // 2  == expert_data.shape[shard_dim+1] * 2:
+            # print("### _load_w13 together, expert_data.shape: {}\n".format(expert_data.shape))
+            expert_data.copy_(loaded_weight)
         else:
-            assert shard_id == "w3"
-            expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
-        expert_data.copy_(loaded_weight)
+            shard_size = expert_data.shape[shard_dim] // 2
+            loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
+                                                shard_size)
+            # Narrow parameter and load.
+            # w1, gate_proj: Load into first logical weight of w13.
+            if shard_id == "w1":
+                expert_data = expert_data.narrow(shard_dim, 0, shard_size)
+            # w3, up_proj: Load into second logical weight of w13.
+            else:
+                assert shard_id == "w3"
+                expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+            expert_data.copy_(loaded_weight)
 
     def _load_w2(self,
                  expert_data: torch.Tensor,

@@ -6,12 +6,17 @@ import glob
 import hashlib
 import json
 import os
+from os import PathLike
+import safetensors
 import tempfile
 import time
+import base64
+import pickle
+from dataclasses import dataclass
 from collections import defaultdict
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Union, Tuple, Dict
 
 import filelock
 import gguf
@@ -56,6 +61,56 @@ logger = init_logger(__name__)
 # system reboots, so users will not complain about annoying lock files
 temp_dir = tempfile.gettempdir()
 
+
+@dataclass(eq=True, frozen=True)
+class STKey:
+    keys: Tuple
+    value_is_pickled: bool
+
+
+def encode_key(key: STKey) -> str:
+    b = pickle.dumps((key.keys, key.value_is_pickled))
+    b = base64.urlsafe_b64encode(b)
+    return str(b, "ASCII")
+
+
+def decode_key(key: str) -> STKey:
+    b = base64.urlsafe_b64decode(key)
+    keys, value_is_pickled = pickle.loads(b)
+    return STKey(keys, value_is_pickled)
+
+
+PathOrStr = Union[str, PathLike]
+
+def safetensors_file_to_state_dict(filename: PathOrStr, map_location: Optional[str] = None) -> Dict:
+    if map_location is None:
+        map_location = "cpu"
+    state_dict = safetensors.torch.load_file(filename, device=map_location)
+    state_dict = {decode_key(k): v for k, v in state_dict.items()}
+    # for key, _ in state_dict.items():
+    #     print("### safetensors_file_to_state_dict {}: state_dict key {}".format(filename, key))
+    return unflatten_dict(state_dict)
+
+
+
+def unflatten_dict(d: Dict[STKey, torch.Tensor]) -> Dict:
+    result: Dict = {}
+
+    for key, value in d.items():
+        if key.value_is_pickled:
+            value = pickle.loads(value.numpy().data)
+
+        target_dict = result
+        for k in key.keys[:-1]:
+            new_target_dict = target_dict.get(k)
+            if new_target_dict is None:
+                new_target_dict = {}
+                target_dict[k] = new_target_dict
+            target_dict = new_target_dict
+        target_dict[key.keys[-1]] = value
+    # for key, value in result.items():
+    #     print("### unflatten_dict state_dict key {}, value type: {}".format(key, type(value)))
+    return result
 
 def enable_hf_transfer():
     """automatically activates hf_transfer
@@ -363,6 +418,7 @@ def filter_duplicate_safetensors_files(hf_weights_files: list[str],
     # to identify weights that we should use.
     with open(index_file_name) as f:
         weight_map = json.load(f)["weight_map"]
+    # print("### filter_duplicate_safetensors_files weight_map: {}\n".format(weight_map))
     weight_files_in_index = set()
     for weight_name in weight_map:
         weight_files_in_index.add(
@@ -371,6 +427,8 @@ def filter_duplicate_safetensors_files(hf_weights_files: list[str],
     hf_weights_files = [
         f for f in hf_weights_files if f in weight_files_in_index
     ]
+    # print("### filter_duplicate_safetensors_files hf_weights_files: {}\n".format(hf_weights_files))
+
     return hf_weights_files
 
 
@@ -466,11 +524,13 @@ def safetensors_weights_iterator(
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
     ):
-        with safe_open(st_file, framework="pt") as f:
-            for name in f.keys():  # noqa: SIM118
-                param = f.get_tensor(name)
-                yield name, param
-
+        # with safe_open(st_file, framework="pt") as f:
+        #     for name in f.keys():  # noqa: SIM118
+        #         param = f.get_tensor(name)
+        #         yield name, param
+        params_dict = safetensors_file_to_state_dict(st_file)
+        for name, tensor in params_dict.items():
+            yield name, tensor
 
 def runai_safetensors_weights_iterator(
     hf_weights_files: list[str],

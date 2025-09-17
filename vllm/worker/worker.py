@@ -250,6 +250,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
+        print("### determine_num_available_blocks start profile run\n")
         with memory_profiling(
                 self.baseline_snapshot,
                 weights_memory=self.model_runner.model_memory_usage) as result:
@@ -265,6 +266,7 @@ class Worker(LocalOrDistributedWorkerBase):
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
         cache_block_size = self.get_cache_block_size_bytes()
+        print("### determine_num_available_blocks cache_block_size: {}\n".format(cache_block_size))
         if cache_block_size == 0:
             num_gpu_blocks = 0
             num_cpu_blocks = 0
@@ -345,6 +347,9 @@ class Worker(LocalOrDistributedWorkerBase):
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
+        for ve_id in range(len(self.gpu_cache)):
+            for layer_id in range(len(self.gpu_cache[ve_id])):
+                print("### _init_cache_engine self.gpu_cache ve_id: {}, layer_idx: {}, shape: {}\n".format(torch.distributed.get_rank(), ve_id, layer_id, self.gpu_cache[ve_id][layer_id].shape))
         bind_kv_cache(self.compilation_config.static_forward_context,
                       self.gpu_cache)
 
@@ -358,6 +363,7 @@ class Worker(LocalOrDistributedWorkerBase):
                 x for x in warmup_sizes if x not in
                 self.vllm_config.compilation_config.cudagraph_capture_sizes
             ]
+        print("### _warm_up_model warmup_sizes: {}\n".format(warmup_sizes))
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
