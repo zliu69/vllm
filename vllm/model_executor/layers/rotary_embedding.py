@@ -827,8 +827,9 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         # Get n-d magnitude scaling corrected for interpolation.
         self.mscale = float(
             yarn_get_mscale(self.scaling_factor, float(mscale)) /
-            yarn_get_mscale(self.scaling_factor, float(mscale_all_dim)) *
-            attn_factor)
+            yarn_get_mscale(self.scaling_factor, float(mscale_all_dim)) )
+            # *
+            # attn_factor)
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
 
@@ -856,15 +857,29 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
-        t = torch.arange(self.max_position_embeddings * self.scaling_factor,
+        t = torch.arange(self.max_position_embeddings,
+                        #  * self.scaling_factor,
                          device=current_platform.device_type,
                          dtype=torch.float32)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
-        cos = (freqs.cos() * self.mscale)
-        sin = (freqs.sin() * self.mscale)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = (torch.cos(emb) * self.mscale).to(t.dtype)
+        sin = (torch.sin(emb) * self.mscale).to(t.dtype)
         cache = torch.cat((cos, sin), dim=-1)
+        # cos = (freqs.cos() * self.mscale)
+        # sin = (freqs.sin() * self.mscale)
+        # cache = torch.cat((cos, sin), dim=-1)
         return cache
-
+    
+    def interleave_mla(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        x1 = x[..., 0::2]
+        x2 = x[..., 1::2]
+        t = torch.cat((x1, x2), dim=-1)
+        return t
+    
     def forward(
         self,
         positions: torch.Tensor,
@@ -874,37 +889,56 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
         assert key is not None
+        # print("### ds yarn forward rotary_dim: {}, head_size: {} query shape: {} key shape: {}\n".format(self.rotary_dim, self.head_size, query.shape, key.shape))
         query_rot = query[..., :self.rotary_dim]
         key_rot = key[..., :self.rotary_dim]
+        query_rot = self.interleave_mla(query_rot)
+        key_rot = self.interleave_mla(key_rot)
         if self.rotary_dim < self.head_size:
             query_pass = query[..., self.rotary_dim:]
             key_pass = key[..., self.rotary_dim:]
+        if len(positions.shape) == 1:
+            # print("### ds yarn forward positions: {} shape only 1: {}\n".format(positions, positions.shape))
+            positions = positions.unsqueeze(0)
 
         if self.cos_sin_cache.device != positions.device:
             self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(
                 positions.device)
+        
+        # print("### ds yarn forward self.cos_sin_cache: {}, shape: {}, positions: {} positions shape: {}\n".format(self.cos_sin_cache, self.cos_sin_cache.shape, positions, positions.shape))
+
         cos_sin = self.cos_sin_cache[torch.add(positions, offsets)
                                      if offsets is not None else positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
-        if self.is_neox_style:
-            # NOTE(woosuk): Here we assume that the positions tensor has the
-            # shape [batch_size, seq_len].
-            cos = cos.repeat(1, 1, 2).unsqueeze(-2)
-            sin = sin.repeat(1, 1, 2).unsqueeze(-2)
-        else:
-            cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
-            sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
+        cos = cos.unsqueeze(-2).squeeze(0)
+        sin = sin.unsqueeze(-2).squeeze(0)
+        # print("### ds yarn forward cos: {} cos shape: {} sin: {} sin shape: {}\n".format(cos, cos.shape, sin, sin.shape))
 
+        # if self.is_neox_style:
+        #     # NOTE(woosuk): Here we assume that the positions tensor has the
+        #     # shape [batch_size, seq_len].
+        #     cos = cos.repeat(1, 1, 2).unsqueeze(-2)
+        #     sin = sin.repeat(1, 1, 2).unsqueeze(-2)
+        # else:
+        #     cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
+        #     sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
+        # print("### ds yarn forward after repeat cos: {} cos shape: {} sin: {} sin shape: {}\n".format(cos, cos.shape, sin, sin.shape))
+        # print("### is_neox_style: {}\n".format(self.is_neox_style))
         rotate_fn = _rotate_neox if self.is_neox_style else _rotate_gptj
-        query_rot = query_rot * cos + rotate_fn(query_rot) * sin
-        key_rot = key_rot * cos + rotate_fn(key_rot) * sin
+        
+        # print("### ds yarn forward after repeat cos: {} cos shape: {} sin: {} sin shape: {}\n".format(cos, cos.shape, sin, sin.shape))
+        # print("### ds yarn forward before cossin query_rot: {} query_rot shape: {}, rotate_fn(query_rot): {}\n".format(query_rot, query_rot.shape, rotate_fn(query_rot)))
 
-        if self.rotary_dim < self.head_size:
-            query = torch.cat((query_rot, query_pass), dim=-1)
-            key = torch.cat((key_rot, key_pass), dim=-1)
-        else:
-            query = query_rot
-            key = key_rot
+        query_rot_ = query_rot * cos + rotate_fn(query_rot) * sin
+        key_rot_ = key_rot * cos + rotate_fn(key_rot) * sin
+        # print("### ds yarn forward after cossin query_rot: {} query_rot shape: {}, \n".format(query_rot_, query_rot_.shape))
+
+        # if self.rotary_dim < self.head_size:
+        #     query = torch.cat((query_rot, query_pass), dim=-1)
+        #     key = torch.cat((key_rot, key_pass), dim=-1)
+        # else:
+        query = query_rot_
+        key = key_rot_
         return query, key
 
 

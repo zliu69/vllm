@@ -99,7 +99,8 @@ class RMSNorm(CustomOp):
         eps: float = 1e-6,
         var_hidden_size: Optional[int] = None,
         has_weight: bool = True,
-        dtype: Optional[torch.dtype] = None,
+        # dtype: Optional[torch.dtype] = None,
+        dtype: Optional[torch.dtype] = torch.bfloat16,
     ) -> None:
         super().__init__()
 
@@ -107,6 +108,7 @@ class RMSNorm(CustomOp):
         self.variance_epsilon = eps
         self.variance_size_override = (None if var_hidden_size == hidden_size
                                        else var_hidden_size)
+        print("### RMSorm self.variance_size_override: {}\n".format(self.variance_size_override))
         self.has_weight = has_weight
         if dtype is not None:
             self.weight = torch.ones(hidden_size, dtype=dtype)
@@ -158,7 +160,9 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        if self.variance_size_override is not None:
+        # if self.variance_size_override is not None:
+        if self.variance_size_override is None:
+            # print("### RMSorm use forward_native\n")
             return self.forward_native(x, residual)
 
         add_residual = residual is not None

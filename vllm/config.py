@@ -1290,7 +1290,7 @@ class ModelConfig:
                             not self.has_noops and \
                             not self.is_attention_free
         start, end = self.get_layers_start_end_indices(parallel_config)
-
+        print("### get_num_layers_by_block_type is_transformer: {}, self.is_hybrid: {}\n".format(is_transformer, self.is_hybrid))
         if is_transformer:
             # Handle the basic case first
             return end - start if attn_block_type else 0
@@ -1307,6 +1307,8 @@ class ModelConfig:
             # Hybrid model Jamba
             layers_block_type_value = getattr(self.hf_config,
                                               "layers_block_type", None)
+            print("### get_num_layers_by_block_type is_transformer: {}, layers_block_type_value: {}\n".format(is_transformer, layers_block_type_value))
+
             if layers_block_type_value is not None:
                 if hasattr(self.hf_text_config,
                            "model_type") and (self.hf_text_config.model_type
@@ -1321,6 +1323,8 @@ class ModelConfig:
 
             # Hybrid model Minimax
             attn_type_list = getattr(self.hf_config, "attn_type_list", None)
+            print("### get_num_layers_by_block_type is_transformer: {}, attn_type_list: {}\n".format(is_transformer, attn_type_list))
+
             if attn_type_list:
                 return sum(t == 1 for t in attn_type_list[start:end])
 
@@ -1475,6 +1479,7 @@ class ModelConfig:
                 self.tokenizer,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.tokenizer_revision)
+        print("### get_and_verify_max_len max_model_len: {}\n".format(max_model_len))
         max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             tokenizer_config=tokenizer_config,
@@ -3488,12 +3493,12 @@ def _get_and_verify_max_len(
 
             # NOTE: rope_type == "default" does not define factor
             # https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/modeling_rope_utils.py
-            scaling_factor = rope_scaling.get("factor", 1.0)
+            # scaling_factor = rope_scaling.get("factor", 1.0)
 
             if rope_type == "yarn":
                 derived_max_model_len = rope_scaling[
                     "original_max_position_embeddings"]
-            derived_max_model_len *= scaling_factor
+            # derived_max_model_len *= scaling_factor
 
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]

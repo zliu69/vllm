@@ -558,7 +558,7 @@ class FlashAttentionMetadataBuilder(
             for modality, placeholder_map in
             self.multimodal_placeholder_maps.items()
         }
-        print("### FlashAttentionMetadata slot_mapping_tensor: {}, num_decode_tokens: {}, placeholder_index_maps: {}, max_decode_query_len: {}, block_tables: {}\n".format(slot_mapping_tensor, num_decode_tokens, placeholder_index_maps, max_decode_query_len, block_tables))
+        # print("### FlashAttentionMetadata slot_mapping_tensor: {}, num_decode_tokens: {}, placeholder_index_maps: {}, max_decode_query_len: {}, block_tables: {}\n".format(slot_mapping_tensor, num_decode_tokens, placeholder_index_maps, max_decode_query_len, block_tables))
         return FlashAttentionMetadata(
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
@@ -664,7 +664,7 @@ class FlashAttentionImpl(AttentionImpl):
                 f"Supported head sizes are: {support_head_sizes}.")
         self.attn_type = attn_type
         self.is_kn_att = is_kn_att
-        print("### FlashAttentionImpl init self.attn_type : {}, self.is_kn_att: {}\n".format(self.attn_type, self.is_kn_att))
+        # print("### FlashAttentionImpl init self.attn_type : {}, self.is_kn_att: {}\n".format(self.attn_type, self.is_kn_att))
 
     def forward(
         self,
@@ -714,7 +714,7 @@ class FlashAttentionImpl(AttentionImpl):
                                  "encoder metadata attributes.")
         elif ( not self.is_kn_att and attn_type == AttentionType.ENCODER_DECODER
               and (not attn_metadata.is_all_cross_attn_metadata_set)):
-            print("###  flash att forward self.is_kn_att: {}\n".format(self.is_kn_att))
+            # print("###  flash att forward self.is_kn_att: {}\n".format(self.is_kn_att))
             raise AttributeError("Encoder/decoder cross-attention "
                                  "requires setting cross-attention "
                                  "metadata attributes.")
@@ -730,7 +730,7 @@ class FlashAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "FlashAttention does not support FP8 kv-cache on this device.")
 
-        if kv_cache.numel() > 0:
+        if kv_cache.numel() > 0 and (not self.is_kn_att):
             key_cache = kv_cache[0]
             value_cache = kv_cache[1]
             # We skip updating the KV cache under two conditions:
@@ -742,7 +742,7 @@ class FlashAttentionImpl(AttentionImpl):
             #     tensor. Thus, we skip cache updates during this time.
             if (attn_type != AttentionType.ENCODER) and (key is not None) and (
                     value is not None):
-                if attn_type == AttentionType.ENCODER_DECODER and not self.is_kn_att:
+                if attn_type == AttentionType.ENCODER_DECODER and (not self.is_kn_att):
                     # Update cross-attention KV cache (prefill-only)
                     updated_slot_mapping = attn_metadata.cross_slot_mapping
                 else:
@@ -778,7 +778,7 @@ class FlashAttentionImpl(AttentionImpl):
                 layer._q_scale)
             query = query.reshape((num_tokens, num_heads, head_size))
                 
-        print("### FlashAttentionImpl forward attn_type: {}, self.is_kn_att: {}\n".format(attn_type, self.is_kn_att))
+        # print("### FlashAttentionImpl forward attn_type: {}, self.is_kn_att: {}\n".format(attn_type, self.is_kn_att))
 
         (num_prefill_query_tokens, num_prefill_kv_tokens,
         num_decode_query_tokens) = \
@@ -800,7 +800,7 @@ class FlashAttentionImpl(AttentionImpl):
                 # prompt, and they have the same length.
                 q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len = \
                     _get_query_key_seq_metadata(prefill_meta, True, attn_type, self.is_kn_att)
-                print("### FlashAttentionImpl q_seq_start_loc: {}, q_seq_len: {}, k_seq_start_loc: {}, k_seq_len: {}\n".format(q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len))
+                # print("### FlashAttentionImpl q_seq_start_loc: {}, q_seq_len: {}, k_seq_start_loc: {}, k_seq_len: {}\n".format(q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len))
                 if not self.is_kn_att:
                     key = key[:num_prefill_kv_tokens]
                     value = value[:num_prefill_kv_tokens]
@@ -822,6 +822,9 @@ class FlashAttentionImpl(AttentionImpl):
                         (num_kv_tokens, num_kv_heads, head_size))
 
                 descale_shape = (q_seq_start_loc.shape[0] - 1, key.shape[1])
+
+                # print("### prefill flash attn forward impl q: {}, shape: {}, k: {}, shape: {}, v: {}, vshape: {}, output: {}, shape: {}\n".format(query, query.shape, key, key.shape, value, value.shape, output, output.shape))
+
                 flash_attn_varlen_func(
                     q=query,
                     k=key,
@@ -841,6 +844,8 @@ class FlashAttentionImpl(AttentionImpl):
                     k_descale=layer._k_scale.expand(descale_shape),
                     v_descale=layer._v_scale.expand(descale_shape),
                 )
+                # print("### prefill flash attn forward impl, prefill_output: {}, shape: {}, output: {}, shape: {}\n".format(prefill_output, prefill_output.shape, output, output.shape))
+
             else:
                 # prefix-enabled attention
                 assert attn_type == AttentionType.DECODER, (
@@ -871,7 +876,7 @@ class FlashAttentionImpl(AttentionImpl):
                     v_descale=layer._v_scale.expand(descale_shape),
                 )
 
-        if decode_meta := attn_metadata.decode_metadata:
+        elif decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
             # Use flash_attn_varlen_func kernel for speculative decoding
             # because different queries might have different lengths.
@@ -914,7 +919,7 @@ class FlashAttentionImpl(AttentionImpl):
                         block_tables_arg,
                     ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
                     descale_shape = (seq_lens_arg.shape[0], key_cache.shape[-2])
-                    print("### FlashAttentionImpl seq_lens_arg: {}, block_tables_arg: {}, decode_query: {}, key_cache: {}, value_cache: {}\n".format(seq_lens_arg, block_tables_arg.shape, decode_query.shape, key_cache.shape, value_cache.shape))
+                    # print("### FlashAttentionImpl seq_lens_arg: {}, block_tables_arg: {}, decode_query: {}, key_cache: {}, value_cache: {}\n".format(seq_lens_arg, block_tables_arg.shape, decode_query.shape, key_cache.shape, value_cache.shape))
                     flash_attn_with_kvcache(
                         q=decode_query.unsqueeze(1),
                         k_cache=key_cache,
@@ -956,6 +961,8 @@ class FlashAttentionImpl(AttentionImpl):
                         # k_descale=layer._k_scale.expand(descale_shape),
                         # v_descale=layer._v_scale.expand(descale_shape),
                     )
+        # print("### prefill flash attn forward impl final, output: {}, shape: {}\n".format(output, output.shape))
+
         return output
 
 
@@ -1013,7 +1020,7 @@ def _get_query_key_seq_metadata(
                     attn_metadata.max_encoder_seq_len)
         else:
             assert len(attn_metadata.seq_start_loc.shape) == 1 and attn_metadata.seq_start_loc.shape[0] == 2
-            print("### _get_query_key_seq_metadata attn_metadata.seq_start_loc: {}\n".format(attn_metadata.seq_start_loc))
+            # print("### _get_query_key_seq_metadata attn_metadata.seq_start_loc: {}\n".format(attn_metadata.seq_start_loc))
             return (attn_metadata.seq_start_loc, max_seq_len,
                     torch.tensor([0, 64], device=attn_metadata.seq_start_loc.device, dtype=torch.int32),
                     64)

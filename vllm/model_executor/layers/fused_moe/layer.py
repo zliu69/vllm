@@ -1215,6 +1215,7 @@ class FusedMoE(torch.nn.Module):
                     topk=top_k,
                     renormalize=renormalize,
                 )
+                # print("### self.top_k: {}, topk_ids: {}, topk_weights: {}\n".format(top_k, topk_ids, topk_weights))
             else:
                 topk_weights, topk_ids, token_expert_indices = fused_topk(
                     hidden_states=hidden_states,

@@ -452,6 +452,7 @@ class LLM:
             instead pass them via the `inputs` parameter.
         """
         runner_type = self.llm_engine.model_config.runner_type
+        # print("### llm generate runner_type: {}\n".format(runner_type))
         if runner_type not in ["generate", "transcription"]:
             messages = [
                 "LLM.generate() is only supported for (conditional) generation "
@@ -467,7 +468,8 @@ class LLM:
                     "Please initialize vLLM using `--task generate`.")
 
             raise ValueError(" ".join(messages))
-
+                
+        # print("### llm generate prompt_token_ids: {}\n".format(prompt_token_ids))
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, list[str]]], prompts),

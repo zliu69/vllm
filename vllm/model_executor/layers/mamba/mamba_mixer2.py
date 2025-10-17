@@ -5,7 +5,7 @@ from typing import Optional, Union
 
 import torch
 from torch import nn
-
+torch.set_printoptions(sci_mode=False) 
 from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import get_current_vllm_config
@@ -248,6 +248,7 @@ class MambaMixer2(CustomOp):
             params_dtype: Optional[torch.dtype] = torch.float32,
             prefix: str = "",
             chunk_size: int = -1,  # the chunk size used by v1
+            layer_number: int = -1,  # the chunk size used by v1
     ):
         super().__init__()
 
@@ -309,6 +310,7 @@ class MambaMixer2(CustomOp):
         # doesn't allow to override it
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
+        print("### MambaMixer2 quant_config: {}\n".format(quant_config))
         self.in_proj = ColumnParallelLinear(
             input_size=hidden_size,
             output_size=intermediate_size + self.conv_dim + self.num_heads,
@@ -439,7 +441,7 @@ class MambaMixer2(CustomOp):
         # NOTE: chunk_size may be -1 for models without v1 support
         self.chunk_size = chunk_size
         self.prefix = prefix
-
+        self.layer_number = layer_number
     def forward_native(
         self,
         hidden_states: torch.Tensor,
@@ -461,6 +463,7 @@ class MambaMixer2(CustomOp):
         # modes; they are computed at top-level model forward since they
         # stay the same and reused for all mamba layers in the same iteration
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
+        # print("### MambaMixer2 forawrd rank: {}, layer_num: {}, attn_metadata: {}\n".format(torch.distributed.get_rank(), self.layer_number, attn_metadata))
         if envs.VLLM_USE_V1:
             if attn_metadata is not None:
                 assert isinstance(attn_metadata, dict)
@@ -486,11 +489,19 @@ class MambaMixer2(CustomOp):
             seq_idx_p = mamba2_metadata.seq_idx
             chunk_indices_p = mamba2_metadata.chunk_indices
             chunk_offsets_p = mamba2_metadata.chunk_offsets
+        # print("### MambaMixer2 forawrd rank: {}, layer_num: {}, attn_metadata: {}\n".format(torch.distributed.get_rank(), self.layer_number, attn_metadata))
+        # print("### MambaMixer2 forawrd rank: {}, layer_num: {}, mamba2_metadata: {}\n".format(torch.distributed.get_rank(), self.layer_number, mamba2_metadata))
 
         groups_time_state_size = self.n_groups * self.ssm_state_size
 
         # 1. Gated MLP's linear projection
+        # print("### MambaMixer2 forawrd rank: {}, layer_num: {}, hidden_states before inproj: {}, shape: {}\n".format(torch.distributed.get_rank(), self.layer_number, hidden_states, hidden_states.shape))
+
         projected_states, _ = self.in_proj(hidden_states)
+        # print("### MambaMixer2 forawrd rank: {}, layer_num: {}, self.in_proj: {}, shape: {}\n".format(torch.distributed.get_rank(), self.layer_number, self.in_proj.weight, self.in_proj.weight.shape))
+        # print("### MambaMixer2 forawrd rank: {}, layer_num: {}, projected_states matmul: {}\n".format(torch.distributed.get_rank(), self.layer_number, torch.matmul(hidden_states, self.in_proj.weight.t())))
+
+        # print("### MambaMixer2 forawrd rank: {}, layer_num: {}, projected_states: {}, shape: {}\n".format(torch.distributed.get_rank(), self.layer_number, projected_states, projected_states.shape))
 
         if mup_vector is not None:
             projected_states = projected_states * mup_vector
@@ -638,7 +649,7 @@ class MambaMixer2(CustomOp):
             # update ssm states
             # - varlen state is a (num_prefills, nheads, headdim, dstate) tensor
             ssm_state[state_indices_tensor_p] = varlen_state
-
+            # print("### MambaMixer forawrd rank: {}, layer_num: {}, num_decodes : {}, ssm_state shape: {}, conv_state shape: {}\n".format(torch.distributed.get_rank(), self.layer_number, num_prefills, ssm_state.shape, conv_state.shape))
             # - reshape
             ssd_output_list.append(scan_output.view(num_prefill_tokens, -1))
 
@@ -695,15 +706,19 @@ class MambaMixer2(CustomOp):
                 ssd_output_list.append(
                     hidden_states_d.view(-1, (self.num_heads // self.tp_size) *
                                          self.head_dim))
+            # print("### MambaMixer forawrd rank: {}, layer_num: {}, num_decodes : {}, ssm_state shape: {}, conv_state shape: {}\n".format(torch.distributed.get_rank(), self.layer_number, num_decodes, ssm_state.shape, conv_state.shape))
 
         # Merge prefill and decode outputs before passing to gated MLP
         hidden_states = torch.vstack(ssd_output_list)
+        # print("### MambaMixer forawrd rank: {}, layer_num: {}, hidden_states before norm: {}, shape: {}\n".format(torch.distributed.get_rank(), self.layer_number, hidden_states, hidden_states.shape))
 
         # 4. gated MLP
         # GatedRMSNorm internally applying SiLU to the gate
         # SiLU is applied internally before normalization, unlike standard
         # norm usage
+
         hidden_states = self.norm(hidden_states, gate)
+        # print("### MambaMixer forawrd rank: {}, layer_num: {}, hidden_states after norm: {}, shape: {}\n".format(torch.distributed.get_rank(), self.layer_number, hidden_states, hidden_states.shape))
 
         # 5. Final linear projection
         out, _ = self.out_proj(hidden_states)

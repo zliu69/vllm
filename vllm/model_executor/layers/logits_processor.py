@@ -60,6 +60,7 @@ class LogitsProcessor(nn.Module):
         sampling_metadata: Optional[SamplingMetadata] = None,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
+        # print("### logitsprocessor hidden_states: {}, shape: {}\n".format(hidden_states, hidden_states.shape))
         if self.logits_as_input:
             logits = hidden_states
         else:
@@ -69,6 +70,8 @@ class LogitsProcessor(nn.Module):
 
             # Get the logits for the next tokens.
             logits = self._get_logits(hidden_states, lm_head, embedding_bias)
+            # print("### logitsprocessor logits after lm_head: {}, shape: {}, lm_head.weight: {}, shape: {}\n".format(logits, logits.shape, lm_head.weight, lm_head.weight.shape))
+
         if logits is not None:
             if self.soft_cap is not None:
                 logits = logits / self.soft_cap
@@ -82,6 +85,7 @@ class LogitsProcessor(nn.Module):
             if sampling_metadata is not None and \
                 sampling_metadata.seq_groups is not None:
                 logits = _apply_logits_processors(logits, sampling_metadata)
+        # print("### logitsprocessor logits final: {}, shape: {}\n".format(logits, logits.shape))
 
         return logits
 
@@ -150,6 +154,7 @@ def _apply_logits_processors(
         seq_ids = seq_group.seq_ids
         sampling_params = seq_group.sampling_params
         logits_processors = sampling_params.logits_processors
+        # print("### _apply_logits_processors logits_processors: {}\n".format(logits_processors))
         if logits_processors:
             found_logits_processors = True
 

@@ -245,6 +245,22 @@ class JambaDoEConfig(PretrainedConfig):
         else:
             raise ValueError(f"Unsupported params_dtype: {params_dtype}. "
                              "Only fp16, fp32, bf16 is supported for now.")
+        
+        #              if k in ("extrapolation_factor", "attn_factor", "beta_fast",
+                        #  "beta_slow", "mscale", "mscale_all_dim")
+        if not rope_scaling:
+            print("### rope scaling is None, init with default value.\n")
+            self.rope_scaling = {
+                "factor": 40,
+                "mscale": 0.707,
+                "mscale_all_dim": 0.707,
+                "beta_fast": 32,
+                "beta_slow": 1,
+                "original_max_position_embeddings": 524288,
+                "extrapolation_factor": 1.0,
+                "rope_type": "deepseek_yarn"
+
+            }
 
         if moe_router_dtype == "fp16" or moe_router_dtype == "bf16" or moe_router_dtype == "fp32":
             self.moe_router_dtype = moe_router_dtype

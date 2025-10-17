@@ -54,7 +54,7 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
     """
 
     global _KV_CONNECTOR_AGENT
-
+    # print("### vllm_config.kv_transfer_config: {}\n".format(vllm_config.kv_transfer_config))
     if vllm_config.kv_transfer_config is None:
         return
 

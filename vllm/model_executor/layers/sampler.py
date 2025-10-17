@@ -221,6 +221,7 @@ class Sampler(nn.Module):
         self._do_penalties = do_penalties
         self._do_top_p_top_k = do_top_p_top_k
         self._do_min_p = do_min_p
+        # print("### Sampler _init_sampling_tensors self._do_penalties: {}, self._do_top_p_top_k: {}, self._do_min_p: {}\n".format(self._do_penalties, self._do_top_p_top_k, self._do_min_p))
 
     def forward(
         self,
@@ -293,6 +294,7 @@ class Sampler(nn.Module):
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
         # Compute the log probabilities.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
+        # print("### Sampler forward probs: {}, shape: {}, logprobs : {}, shape: {}\n".format(probs, probs.shape, logprobs, logprobs.shape))
 
         # Sample the next tokens.
         maybe_deferred_sample_results, maybe_sampled_tokens_tensor = _sample(
@@ -630,6 +632,7 @@ def _sample_with_torch(
     * Defer Pythonization & preserve GPU-side
       tensors required for Pythonization
     '''
+    # print("### _sample_with_torch sampling_metadata: {}\n".format(sampling_metadata))
 
     categorized_seq_group_ids: dict[SamplingType, list[int]] = {
         t: []
@@ -710,6 +713,9 @@ def _sample_with_torch(
 
         else:
             raise ValueError(f"Unsupported sampling type: {sampling_type}")
+    # if sampled_token_ids_tensor is not None:
+    #     print("### _sample_with_torch sampled_token_ids_tensor: {}, shape {}\n".format(sampled_token_ids_tensor, sampled_token_ids_tensor.shape))
+
 
     # Encapsulate arguments for computing Pythonized sampler
     # results, whether deferred or otherwise.

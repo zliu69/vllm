@@ -984,7 +984,8 @@ def sigmoid_topk(
         "Number of tokens mismatch")
 
     if scoring_func == "sigmoid":
-        scores = gating_output.sigmoid()
+        scores = torch.sigmoid(gating_output)
+        # gating_output.sigmoid()
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
@@ -999,8 +1000,10 @@ def sigmoid_topk(
     # else:
     #     group_scores = scores.view(num_token, num_expert_group,
     #                                -1).max(dim=-1).values  # [n, n_group]
-    topk_weights, experts_idx = torch.topk(scores, k=topk, dim=-1,
-                           sorted=False)  # [n, top_k]
+    topk_weights, experts_idx = torch.topk(scores, k=topk, dim=-1)
+    # print("### sigmoid_topk self.top_k: {}, topk_ids: {}, topk_weights: {}\n".format(topk, experts_idx, topk_weights))
+
+                        #    sorted=False)  # [n, top_k]
     # group_mask = torch.zeros_like(group_scores)  # [n, n_group]
     # group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
     # score_mask = group_mask.unsqueeze(-1).expand(

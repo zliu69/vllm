@@ -7,6 +7,7 @@ import re
 import torch
 from torch import nn
 # from transformers import JambaConfig
+torch.set_printoptions(sci_mode=False) 
 from transformers import PretrainedConfig
 
 from vllm.attention.layer import Attention, AttentionType
@@ -411,7 +412,7 @@ class JambaDoEMoE(nn.Module):
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.routed_scaling_factor = config.routed_scaling_factor
+        # self.routed_scaling_factor = config.routed_scaling_factor
 
         self.ep_group = get_ep_group().device_group
         self.ep_rank = self.ep_group.rank()
@@ -440,11 +441,11 @@ class JambaDoEMoE(nn.Module):
                                      quant_config=None,
                                      params_dtype=torch.bfloat16,
                                      prefix=f"{prefix}.shared_experts_gate")
-        if config.topk_method == "noaux_tc":
-            self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts))
-        else:
-            self.gate.e_score_correction_bias = None
+        # if config.topk_method == "noaux_tc":
+        #     self.gate.e_score_correction_bias = nn.Parameter(
+        #         torch.empty(config.n_routed_experts))
+        # else:
+        #     self.gate.e_score_correction_bias = None
 
         # Load balancing settings.
         vllm_config = get_current_vllm_config()
@@ -519,25 +520,30 @@ class JambaDoEMoE(nn.Module):
                 shared_output = torch.nn.functional.sigmoid(
                     self.shared_experts_gate(hidden_states)[0]) * shared_output
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
+        # print("### TopKRouter forward hidden_states: {}, shape: {}\n".format(hidden_states, hidden_states.shape))
+        # router_logits, _ = self.gate(hidden_states)
+        router_logits = torch.nn.functional.linear(hidden_states.to(torch.float32), self.gate.weight.to(torch.float32), None)
+        # print("### TopKRouter forward router_logits: {}, shape: {}\n".format(router_logits, router_logits.shape))
 
-        if hidden_states.dtype != torch.float16:
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits) * self.routed_scaling_factor
-        else:
-            # Fix FP16 overflow
-            # See DeepseekV2DecoderLayer for more details.
-            final_hidden_states = self.experts(hidden_states=hidden_states,
-                                               router_logits=router_logits)
+        # if hidden_states.dtype != torch.float16:
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits)
+        # * self.routed_scaling_factor
+        # else:
+        #     # Fix FP16 overflow
+        #     # See DeepseekV2DecoderLayer for more details.
+        #     final_hidden_states = self.experts(hidden_states=hidden_states,
+        #                                        router_logits=router_logits)
         if shared_output is not None:
-            if hidden_states.dtype != torch.float16:
-                final_hidden_states = final_hidden_states + shared_output
-            else:
-                # Fix FP16 overflow
-                # See DeepseekV2DecoderLayer for more details.
-                final_hidden_states = final_hidden_states + shared_output \
-                    * (1. / self.routed_scaling_factor)
+            final_hidden_states = final_hidden_states + shared_output
+            # if hidden_states.dtype != torch.float16:
+            #     final_hidden_states = final_hidden_states + shared_output
+            # else:
+            #     # Fix FP16 overflow
+            #     # See DeepseekV2DecoderLayer for more details.
+            #     final_hidden_states = final_hidden_states + shared_output \
+            #         * (1. / self.routed_scaling_factor)
 
         # if self.tp_size > 1:
         #     final_hidden_states = (
@@ -591,23 +597,26 @@ class JambaDoEMambaDecoderLayer(nn.Module):
         #                         activation=config.hidden_act,
         #                         is_lora_enabled = self.is_lora_enabled
         #                         )
-
+        self.layer_idx = layer_idx
         self.mamba = MambaMixer2(hidden_size= config.hidden_size,
                                 ssm_state_size = config.mamba_d_state,
                                 conv_kernel_size = config.mamba_d_conv,
                                 intermediate_size = config.mamba_expand *\
                                                     config.hidden_size,
                                 use_conv_bias = config.mamba_conv_bias,
-                                use_bias = config.mamba_proj_bias,
+                                # use_bias = config.mamba_proj_bias,
+                                use_bias = False,
                                 n_groups=config.mamba_n_groups,
                                 num_heads=config.mamba_n_heads,
                                 head_dim=config.mamba_d_head,
+                                use_rms_norm=True,
                                 rms_norm_eps=config.rms_norm_eps,
                                 activation=config.hidden_act,
                                 quant_config=quant_config,
                                 prefix=f"{prefix}.mixer",
                                 params_dtype=torch.bfloat16,
                                 chunk_size=config.mamba_chunk_size,
+                                layer_number=self.layer_idx,
                                 )
 
         num_experts = config.layers_num_experts[layer_idx]
@@ -630,23 +639,41 @@ class JambaDoEMambaDecoderLayer(nn.Module):
         mamba_metadata: Mamba2Metadata,
         **kwargs,
     ):
+        # print("### JambaDoEMambaDecoderLayer forward rank: {}, layer_num: {}, input hidden_states before norm: {}, shape: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states, hidden_states.shape))
+
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
+            # print("### JambaDoEMambaDecoderLayer forward rank: {}, layer_num: {}, input hidden_states while none residual: {}, shape: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states, hidden_states.shape))
+
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+            hidden_states = self.input_layernorm(hidden_states)
+            hidden_states = hidden_states + residual
+            residual = hidden_states
+            # hidden_states, residual = self.input_layernorm(
+            #     hidden_states, residual)
+                        
+            # print("### JambaDoEMambaDecoderLayer forward rank: {}, layer_num: {}, input hidden_states with input residual: {}, shape: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states, hidden_states.shape))
 
         hidden_states = self.mamba(hidden_states, mamba_cache_params, mamba_metadata)
+        # print("### JambaDoEMambaDecoderLayer forward rank: {}, layer_num: {}, hidden_states after mixer: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states))
+
+        hidden_states = hidden_states + residual
         # Fully Connected
-        hidden_states, residual = self.pre_ff_layernorm(
-            hidden_states, residual)
+        residual = hidden_states
+        hidden_states = self.pre_ff_layernorm(hidden_states)
+        # hidden_states, residual = self.pre_ff_layernorm(
+        #     hidden_states, residual)
+        
+        # print("### JambaDoEMambaDecoderLayer forward rank: {}, layer_num: {}, hidden_states after bda and pre_ff_layernorm: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states))
 
         hidden_states = self.mlp(hidden_states)
+        
+        # print("### JambaDoEMambaDecoderLayer forward rank: {}, layer_num: {}, hidden_states after mlp: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states))
 
-        # hidden_states = hidden_states + residual
+        hidden_states = hidden_states + residual
 
-        return hidden_states, residual
+        return hidden_states, None
 
 
 # class DeepseekV2Attention(nn.Module):
@@ -871,10 +898,10 @@ class JambaDoEMLAAttention(nn.Module):
         assert num_heads % tp_size == 0
         self.num_local_heads = num_heads // tp_size
 
-        self.scaling = self.qk_head_dim**-0.5
+        self.softmax_scaling = self.qk_head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
-
+        self.prefix = prefix
         if self.q_lora_rank is not None:
             self.q_a_proj = ReplicatedLinear(self.hidden_size,
                                              self.q_lora_rank,
@@ -924,20 +951,22 @@ class JambaDoEMLAAttention(nn.Module):
                                         quant_config=quant_config,
                                         params_dtype=torch.bfloat16,
                                         prefix=f"{prefix}.o_proj")
-
+        # print("### JambaDoEMLAAttention rope_scaling: {}\n".format(rope_scaling))
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
         self.rotary_emb = get_rope(qk_rope_head_dim,
                                    rotary_dim=qk_rope_head_dim,
-                                   max_position=max_position_embeddings,
+                                   max_position=rope_scaling["original_max_position_embeddings"],
                                    base=rope_theta,
                                    rope_scaling=rope_scaling,
-                                   is_neox_style=False)
-        if rope_scaling:
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
-            scaling_factor = rope_scaling["factor"]
-            mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
-            self.scaling = self.scaling * mscale * mscale
+                                   is_neox_style=True)
+        # if rope_scaling:
+        #     mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
+        #     scaling_factor = rope_scaling["factor"]
+        #     mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
+        #     self.scaling = self.scaling * mscale * mscale
+        # print("### JambaDoEMLAAttention mscale: {}, self.scaling : {}, scaling_factor: {}, mscale_all_dim: {}\n".format(mscale, self.softmax_scaling, scaling_factor, mscale_all_dim))
+        # print("### JambaDoEMLAAttention self.scaling : {}, \n".format(self.softmax_scaling))
 
         # In the MLA backend, kv_cache includes both k_c and
         # pe (i.e. decoupled position embeddings). In particular,
@@ -965,7 +994,7 @@ class JambaDoEMLAAttention(nn.Module):
         # )
         self.attn = Attention(self.num_local_heads,
                               self.qk_head_dim,
-                              self.scaling,
+                              self.softmax_scaling,
                               num_kv_heads=self.num_local_heads,
                               cache_config=cache_config,
                               quant_config=quant_config,
@@ -980,43 +1009,74 @@ class JambaDoEMLAAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         if self.q_lora_rank is not None:
-            q = self.q_a_proj(hidden_states)[0]
+            # q = self.q_a_proj(hidden_states)[0]
+            q = torch.nn.functional.linear(hidden_states, self.q_a_proj.weight, None)
+            # print("### layer: {}, q after down proj: {}, shape: {}, self.q_a_proj.weight: {}, shape: {}\n".format(self.prefix, q, q.shape, self.q_a_proj.weight, self.q_a_proj.weight.shape))
+
             # q = self.q_a_layernorm(q)
-            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads,
+
+            # q = self.q_b_proj(q)[0].view(-1, self.num_local_heads,
+            #                              self.qk_head_dim)
+            q = torch.nn.functional.linear(q, self.q_b_proj.weight, None).view(-1, self.num_local_heads,
                                          self.qk_head_dim)
+            # print("### layer: {}, q after up proj: {}, shape: {}, self.q_a_proj.weight: {}, shape: {}\n".format(self.prefix, q, q.shape, self.q_b_proj.weight, self.q_b_proj.weight.shape))
+
         else:
             q = self.q_proj(hidden_states)[0].view(-1, self.num_local_heads,
                                                    self.qk_head_dim)
-        _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
+        q_no_pe, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
                                dim=-1)
-        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
-        kv_a, _ = latent_cache.split(
+        # print("### layer: {}, q_no_pe: {}, q_pe: {}\n".format(self.prefix, q_no_pe, q_pe))
+
+        latent_cache, _ = self.kv_a_proj_with_mqa(hidden_states)
+        kv_a, k_pe = latent_cache.split(
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        latent_cache = latent_cache.unsqueeze(1)
+        # latent_cache = latent_cache.unsqueeze(1)
+        k_pe = k_pe.unsqueeze(1)
         kv_a = kv_a.contiguous()
+        # print("### layer: {}, kv_a: {}, k_pe: {}\n".format(self.prefix, kv_a, k_pe))
+
         # kv_a = self.kv_a_layernorm(kv_a.contiguous())
-        kv = self.kv_b_proj(kv_a)[0]
+        kv, _ = self.kv_b_proj(kv_a)
+        # print("### layer: {}, kv after kv_b_proj: {}, kv shape: {}\n".format(self.prefix, kv, kv.shape))
+
         kv = kv.view(-1, self.num_local_heads,
                      self.qk_nope_head_dim + self.v_head_dim)
+
         k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k_pe = latent_cache[:, :, self.kv_lora_rank:]
+        # print("### layer: {}, k_nope: {}, k_nope shape: {}, v: {}, v shape before emb: {}\n".format(self.prefix, k_nope, k_nope.shape, v, v.shape))
 
-        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+        # k_pe = latent_cache[:, :, self.kv_lora_rank:]
+        # print("### layer: {}, q_pe: {}, q_pe shape: {}, k_pe: {}, k_pe shape before emb: {}\n".format(self.prefix, q_pe, q_pe.shape, k_pe, k_pe.shape))
 
-        q[..., self.qk_nope_head_dim:] = q_pe
+        q_pe_, k_pe_ = self.rotary_emb(positions, q_pe, k_pe)
+        # print("### layer: {},  positions: {}\n".format(self.prefix, positions))
+
+        # print("### layer: {}, q_pe after: {}, q_pe shape: {}, k_pe: {}, k_pe shape: {}\n".format(self.prefix, q_pe_, q_pe_.shape, k_pe_, k_pe_.shape))
+        q[..., self.qk_nope_head_dim:] = q_pe_
         k = torch.empty_like(q)
         k[..., :self.qk_nope_head_dim] = k_nope
-        k[..., self.qk_nope_head_dim:] = k_pe
+        k[..., self.qk_nope_head_dim:] = k_pe_
         # padding value to qk_head_dim for alignment
         v = torch.nn.functional.pad(
             v, [0, self.qk_head_dim - self.v_head_dim],
-            value=0).view(-1, self.num_local_heads * self.qk_head_dim)
+            value=0).view(-1, self.num_local_heads, self.qk_head_dim)
+                
+        # print("### layer: {}, q: {}, shape: {}, k: {}, shape: {}, v: {}, vshape: {}\n".format(self.prefix, q, q.shape, k, k.shape, v, v.shape))
+
         attn_output = self.attn(q, k, v)
+        # print("### layer: {}, attn_output: {}, attn_output shape: {}\n".format(self.prefix,attn_output, attn_output.shape))
+
         attn_output = attn_output.view(
             -1, self.num_local_heads,
             self.qk_head_dim)[..., :self.v_head_dim].reshape(
                 -1, self.num_local_heads * self.v_head_dim)
+        
+        # print("### layer: {}, attn_output after reshape: {}, attn_output shape: {}\n".format(self.prefix,attn_output, attn_output.shape))
+
         output, _ = self.o_proj(attn_output)
+        # print("### layer: {}, attn_output output: {}, output shape: {}\n".format(self.prefix,output, output.shape))
+
         return output, kv_a
 
 
@@ -1248,6 +1308,7 @@ class JambaDoEAttentionDecoderLayer(nn.Module):
                     dtype=torch.bfloat16,
                 )
         self.conv1d_cache = torch.zeros([config.conv_attention_kernel_size - 1, config.hidden_size], device=torch.cuda.current_device(), dtype=torch.bfloat16)
+        self.orig_conv1d_cache  = torch.zeros([config.conv_attention_kernel_size - 1, config.hidden_size], device=torch.cuda.current_device(), dtype=torch.bfloat16)
         # if model_config.use_mla:
         attn_cls = JambaDoEMLAAttention
         # else:
@@ -1311,27 +1372,50 @@ class JambaDoEAttentionDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Self Attention
-        if residual is None:
-            residual = hidden_states
-           
-        else:
-            hidden_states = residual + hidden_states
-            residual = hidden_states
+        # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, input hidden_states before add residual: {}, shape: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states, hidden_states.shape))
+
+        # if residual is None:
+        residual = hidden_states
+        # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, input hidden_states while none residual: {}, shape: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states, hidden_states.shape))
+
+        # else:
+        #     hidden_states = residual + hidden_states
+        #     residual = hidden_states
+        #     print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, input hidden_states with residual: {}, shape: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states, hidden_states.shape))
+
 
         forward_context = get_forward_context()
         # num_prefills = forward_context.attn_metadata.num_prefills
         num_decode_tokens = forward_context.attn_metadata.num_decode_tokens
-        print("### rank:{} JambaDoEAttentionDecoderLayer forward input shape: {}, num_decode_tokens: {}\n".format(torch.distributed.get_rank(), hidden_states.shape, num_decode_tokens))
+        # print("### rank:{} JambaDoEAttentionDecoderLayer forward input shape: {}, num_decode_tokens: {}\n".format(torch.distributed.get_rank(), hidden_states.shape, num_decode_tokens))
         
         if num_decode_tokens > 0:
             # decoding
+            # L = hidden_states.size(0)
+            # self.orig_conv1d_cache = self.conv1d_cache
+            self.orig_conv1d_cache.copy_(self.conv1d_cache)
+            # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, tmp_conv1d_cache: {}, shape: {}\n".format(torch.distributed.get_rank(), self.layer_idx, self.orig_conv1d_cache, self.orig_conv1d_cache.shape))
+
             conv1d_input = torch.cat([self.conv1d_cache, hidden_states], dim=0)
+            # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, conv1d_input after cat: {}, shape: {}\n".format(torch.distributed.get_rank(), self.layer_idx, conv1d_input, conv1d_input.shape))
+
+            assert num_decode_tokens < self.config.conv_attention_kernel_size, "Conv1d cache only for num_decode_tokens < conv_attention_kernel_size"
+            # if (L + num_decode_tokens) > self.config.conv_attention_kernel_size:
+            self.conv1d_cache[-num_decode_tokens:] = conv1d_input[-num_decode_tokens:]
+            # self.conv1d_cache[:-num_decode_tokens] = orig_conv1d_cache[]
+            self.conv1d_cache[:-num_decode_tokens].copy_(self.orig_conv1d_cache[-(self.config.conv_attention_kernel_size - 1 - num_decode_tokens):])
+            # else:
+            # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, after update self.conv1d_cache : {}, shape: {}\n".format(torch.distributed.get_rank(), self.layer_idx, self.conv1d_cache, self.conv1d_cache.shape))
+
+
             conv1d_input = conv1d_input.view(-1, 1, self.hidden_size)
-            print("### rank:{} JambaDoEAttentionDecoderLayer forward conv1d_input shape reshaped: {}\n".format(torch.distributed.get_rank(), conv1d_input.shape))
+            # print("### rank:{} JambaDoEAttentionDecoderLayer forward conv1d_input shape reshaped: {}\n".format(torch.distributed.get_rank(), conv1d_input.shape))
             conv1d_output = self.conv1d(conv1d_input.permute(1, 2, 0))[:, :, :-(self.config.conv_attention_kernel_size - 1)].permute(2, 0, 1).contiguous().view(-1, self.hidden_size)
-            self.conv1d_cache = conv1d_output[-3:]
+            
+            # self.conv1d_cache[-1] = conv1d_output[-3:]
             hidden_states = conv1d_output[-num_decode_tokens:]
-        
+            # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, hidden_states after conv1d decoding: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states))
+
         else:
             # prefill
             # if len(hidden_states.shape) == 3:
@@ -1340,33 +1424,53 @@ class JambaDoEAttentionDecoderLayer(nn.Module):
             # else:
                 # forward_context = get_forward_context()
                 # num_prefills = forward_context.attn_metadata.num_prefills
-            hidden_states = hidden_states.view(-1, 1, self.hidden_size)
-            print("### rank:{} JambaDoEAttentionDecoderLayer forward input shape reshaped: {}\n".format(torch.distributed.get_rank(), hidden_states.shape))
-            hidden_states = self.conv1d(hidden_states.permute(1, 2, 0))[:, :, :-(self.config.conv_attention_kernel_size - 1)].permute(2, 0, 1).contiguous().view(-1, self.hidden_size)
             L = hidden_states.size(0)
             if L >= self.config.conv_attention_kernel_size - 1:
-                self.conv1d_cache.copy_(hidden_states[-(self.config.conv_attention_kernel_size - 1)])
+                self.conv1d_cache.copy_(hidden_states[-(self.config.conv_attention_kernel_size - 1):])
             else:
                 self.conv1d_cache[-L:] = hidden_states
+            # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, after prefill self.conv1d_cache : {}, shape: {}, L: {}\n".format(torch.distributed.get_rank(), self.layer_idx, self.conv1d_cache, self.conv1d_cache.shape, L))
+
+            hidden_states = hidden_states.view(-1, 1, self.hidden_size)
+            # print("### rank:{} JambaDoEAttentionDecoderLayer forward input shape reshaped: {}\n".format(torch.distributed.get_rank(), hidden_states.shape))
+            hidden_states = self.conv1d(hidden_states.permute(1, 2, 0))[:, :, :-(self.config.conv_attention_kernel_size - 1)].permute(2, 0, 1).contiguous().view(-1, self.hidden_size)
+
+            # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, hidden_states after conv1d prefill: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states))
 
         hidden_states = self.input_layernorm(hidden_states)
+        # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, hidden_states after input norm: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states))
 
 
         hidden_states, kv_cache = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
+        # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, kv_cache after self_attn: {}\n".format(torch.distributed.get_rank(), self.layer_idx, kv_cache))
 
-
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-
-        knowledge_output = self.knowledge_attn(kv_cache)
-
-        hidden_states = hidden_states + knowledge_output
-
-        hidden_states = self.mlp(hidden_states)
+        # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, hidden_states after self_attn: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states))
 
         hidden_states = hidden_states + residual
+        # print("### ambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, hidden_states after attn bda: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states))
+
+        residual = hidden_states
+        # hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states = self.post_attention_layernorm(hidden_states)
+
+        # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, hidden_states after post_attention_layernorm: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states))
+
+        knowledge_output = self.knowledge_attn(kv_cache)
+        # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, knowledge_output: {}\n".format(torch.distributed.get_rank(), self.layer_idx, knowledge_output))
+
+        hidden_states = hidden_states + knowledge_output
+        # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, hidden_states after knowledge_output: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states))
+
+        hidden_states = self.mlp(hidden_states)
+        # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, hidden_states after mlp: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states))
+
+        hidden_states = hidden_states + residual
+
+        # print("### JambaDoEAttentionDecoderLayer forward rank: {}, layer_num: {}, hidden_states after mlp final add residual: {}\n".format(torch.distributed.get_rank(), self.layer_idx, hidden_states))
+
         # if hidden_states.dtype == torch.float16:
         #     # Fix FP16 overflow
         #     # We scale both hidden_states and residual before
@@ -1422,6 +1526,7 @@ class JambaDoEModel(nn.Module):
                 self.vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
+                params_dtype=torch.bfloat16,
                 # padding_size=0,
             )
         else:
@@ -1475,6 +1580,7 @@ class JambaDoEModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
+                # print("### rank:{} JambaDoEModel forward input ids: {}, input ids shape: {}\n".format(torch.distributed.get_rank(), input_ids, input_ids.shape))
                 hidden_states = self.get_input_embeddings(input_ids)
             residual = None
         else:
@@ -1483,7 +1589,7 @@ class JambaDoEModel(nn.Module):
             residual = intermediate_tensors["residual"]
                 
                 
-        print("### rank:{} JambaDoEModel forward hidden_states shape: {}\n".format(torch.distributed.get_rank(), hidden_states.shape))
+        # print("### rank:{} JambaDoEModel forward hidden_states: {}, hidden_states shape: {}, residual: {}\n".format(torch.distributed.get_rank(), hidden_states, hidden_states.shape, residual))
 
         kv_cache_index = 0
         mamba_cache_index = 0
@@ -1498,12 +1604,12 @@ class JambaDoEModel(nn.Module):
                     residual=residual,
                     )
                 
-            if isinstance(layer, JambaDoEMambaDecoderLayer):
+            elif isinstance(layer, JambaDoEMambaDecoderLayer):
                 current_state_layer = mamba_cache_index
                 layer_mamba_cache_params = mamba_cache_params.at_layer_idx(
                     current_state_layer)
                 mamba_cache_index += 1
-                
+                # print("### JambaDoEModel forward layer_mamba_cache_params current_state_layer : {}, conv state shape: {}, ssm state shape: {}".format(current_state_layer, layer_mamba_cache_params.conv_state.shape,  layer_mamba_cache_params.ssm_state.shape ))
                 hidden_states, residual = layer(
                     positions=positions,
                     hidden_states=hidden_states,
@@ -1511,12 +1617,19 @@ class JambaDoEModel(nn.Module):
                     mamba_cache_params=layer_mamba_cache_params,
                     mamba_metadata=mamba2_metadata,
                     )
+                # continue
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
                 "residual": residual
             })
-        hidden_states, _ = self.final_layernorm(hidden_states, residual)
+        # hidden_states = self.final_layernorm(hidden_states, residual)
+        hidden_states = self.final_layernorm(hidden_states)
+        # hidden_states = hidden_states + residual
+        # hidden_states, _ = self.final_layernorm(hidden_states, residual)
+
+        # print("### rank:{} JambaDoEModel forward hidden_states after final_layernorm: {}\n".format(torch.distributed.get_rank(), hidden_states))
+
         return hidden_states
 
 
@@ -1571,7 +1684,14 @@ class JambaDoEForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             self.lm_head = PPMissingLayer()
         # Used to track and store by the Mamba cache between steps.
         self.mamba_cache: Optional[MambaCacheManager] = None
-
+        if self.mamba_cache is None:
+            num_mamba_layers = self.model_config.get_num_layers_by_block_type(
+                self.vllm_config.parallel_config, LayerBlockType.mamba)
+            # print("### JambaDoEForCausalLM num_mamba_layers: {}\n".format(num_mamba_layers))
+            self.mamba_cache = MambaCacheManager(
+                self.vllm_config, torch.bfloat16, num_mamba_layers,
+                *self._get_mamba_cache_shape())
+            # print("### JambaDoEForCausalLM self.mamba_cache: {}\n".format(self.mamba_cache))
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
 
@@ -1587,18 +1707,13 @@ class JambaDoEForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
-        if self.mamba_cache is None:
-            num_mamba_layers = self.model_config.get_num_layers_by_block_type(
-                self.vllm_config.parallel_config, LayerBlockType.mamba)
-            self.mamba_cache = MambaCacheManager(
-                self.vllm_config, torch.bfloat16, num_mamba_layers,
-                *self._get_mamba_cache_shape())
+
             
-            
-        print("### rank:{} JambaDoEForCausalLM forward input_ids input shape: {}\n".format(torch.distributed.get_rank(), input_ids.shape))
-        print("### rank:{} JambaDoEForCausalLM forward input_ids positions shape: {}\n".format(torch.distributed.get_rank(), positions.shape))
+        # print("### rank:{} JambaDoEForCausalLM forward input_ids input shape: {}\n".format(torch.distributed.get_rank(), input_ids.shape))
+        # print("### rank:{} JambaDoEForCausalLM forward input_ids positions shape: {}, positions: {}\n".format(torch.distributed.get_rank(), positions.shape, positions))
 
         mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
+        # print("### rank:{} JambaDoEForCausalLM forward mamba_cache_params: {}, kwargs: {}\n".format(torch.distributed.get_rank(), mamba_cache_params, kwargs))
 
         hidden_states = self.model(input_ids, positions, mamba_cache_params,
                                    intermediate_tensors, inputs_embeds)
@@ -1808,9 +1923,13 @@ class JambaDoEForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                     name = name.replace("pre_mlp_layernorm", "post_attention_layernorm")
 
 
-            if ".norm.weight" in name and not _is_mamba_layer(name):
+            if ".norm.weight" in name:
+                if not _is_mamba_layer(name):
                 ## map MLP layers to expert with ID=0
-                name = name.replace(".norm.weight", ".input_layernorm.weight")
+                    name = name.replace(".norm.weight", ".input_layernorm.weight")
+                # else:
+                #     pass
+                    # print("### .norm.weight in name at mamba layer, name: {}\n".format(name))
             
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
