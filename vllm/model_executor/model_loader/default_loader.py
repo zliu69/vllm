@@ -270,7 +270,7 @@ class DefaultModelLoader(BaseModelLoader):
     def load_weights(self, model: nn.Module,
                      model_config: ModelConfig) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
-        print("### rank: {}, load_weights weights_to_load: {}\n".format(torch.distributed.get_rank(), weights_to_load))
+        # print("### rank: {}, load_weights weights_to_load: {}\n".format(torch.distributed.get_rank(), weights_to_load))
         loaded_weights = model.load_weights(
             self.get_all_weights(model_config, model))
         self.counter_after_loading_weights = time.perf_counter()
@@ -281,7 +281,7 @@ class DefaultModelLoader(BaseModelLoader):
             self.counter_before_loading_weights)
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking currently.
-        print("### rank: {}, model_config.quantization: {}, loaded_weights: {}\n".format(torch.distributed.get_rank(), model_config.quantization, loaded_weights))
+        # print("### rank: {}, model_config.quantization: {}, loaded_weights: {}\n".format(torch.distributed.get_rank(), model_config.quantization, loaded_weights))
 
         if model_config.quantization is None and loaded_weights is not None:
             weights_not_loaded = weights_to_load - loaded_weights

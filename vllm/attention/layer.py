@@ -139,7 +139,7 @@ class Attention(nn.Module):
                                         blocksparse_params is not None,
                                         use_mla=use_mla)
         impl_cls = attn_backend.get_impl_cls()
-        print("### Attention impl_cls: {}, is_kn_att: {}, extra_impl_args: {}\n".format(impl_cls, is_kn_att, extra_impl_args))
+        # print("### Attention impl_cls: {}, is_kn_att: {}, extra_impl_args: {}\n".format(impl_cls, is_kn_att, extra_impl_args))
         # if isinstance(impl_cls, backends.flash_attn.FlashAttentionImpl)
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,

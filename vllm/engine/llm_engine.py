@@ -234,8 +234,8 @@ class LLMEngine:
             vllm_config,
             use_cached_outputs,
         )
-        print("### llm engine init scheduler_config: {}\n".format(self.scheduler_config))
-        print("### llm engine init cache_config: {}\n".format(self.cache_config))
+        # print("### llm engine init scheduler_config: {}\n".format(self.scheduler_config))
+        # print("### llm engine init cache_config: {}\n".format(self.cache_config))
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
 
@@ -269,7 +269,7 @@ class LLMEngine:
             self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
-        print("### is_usage_stats_enabled(): {}\n".format(is_usage_stats_enabled()))
+        # print("### is_usage_stats_enabled(): {}\n".format(is_usage_stats_enabled()))
         if is_usage_stats_enabled():
             from vllm.model_executor.model_loader import (
                 get_architecture_class_name)
@@ -500,8 +500,8 @@ class LLMEngine:
         if envs.VLLM_USE_V1:
             from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
             engine_cls = V1LLMEngine
-        print("### from_engine_args vllm_config: {}\n".format(vllm_config))
-        print("### from_engine_args vllm_config scheduler_config: {}\n".format(vllm_config.scheduler_config))
+        # print("### from_engine_args vllm_config: {}\n".format(vllm_config))
+        # print("### from_engine_args vllm_config scheduler_config: {}\n".format(vllm_config.scheduler_config))
         return engine_cls.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=usage_context,

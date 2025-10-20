@@ -1148,7 +1148,7 @@ class EngineArgs:
             assert not use_v1, (
                 "DualChunkFlashAttention is not supported on V1 engine. "
                 "To run the model in V0 engine, try set 'VLLM_USE_V1=0'")
-        print("### create engine config self.block_size: {}\n".format(self.block_size))
+        # print("### create engine config self.block_size: {}\n".format(self.block_size))
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1162,7 +1162,7 @@ class EngineArgs:
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
         )
-        print("### create engine config cache_config: {}\n".format(cache_config))
+        # print("### create engine config cache_config: {}\n".format(cache_config))
         # Get the current placement group if Ray is initialized and
         # we are in a Ray actor. If so, then the placement group will be
         # passed to spawned processes.
@@ -1266,7 +1266,7 @@ class EngineArgs:
         num_lookahead_slots = num_lookahead_slots \
             if speculative_config is None \
             else speculative_config.num_lookahead_slots
-        print("### EngineArgs create_engine_config self.max_num_seqs: {}\n".format(self.max_num_seqs))
+        # print("### EngineArgs create_engine_config self.max_num_seqs: {}\n".format(self.max_num_seqs))
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
@@ -1291,8 +1291,8 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.
             disable_hybrid_kv_cache_manager,
         )
-        print("### EngineArgs create_engine_config scheduler_config: {}\n".format(scheduler_config
-                                                                                  ))
+        # print("### EngineArgs create_engine_config scheduler_config: {}\n".format(scheduler_config
+                                                                                #   ))
 
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
@@ -1331,8 +1331,8 @@ class EngineArgs:
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
         )
-        print("### EngineArgs create_engine_config cache_config before: {}\n".format(cache_config
-                                                                                  ))
+        # print("### EngineArgs create_engine_config cache_config before: {}\n".format(cache_config
+        #                                                                           ))
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1350,8 +1350,8 @@ class EngineArgs:
             kv_events_config=self.kv_events_config,
             additional_config=self.additional_config,
         )
-        print("### EngineArgs create_engine_config config.cache_config: {}\n".format(config.cache_config
-                                                                                  ))
+        # print("### EngineArgs create_engine_config config.cache_config: {}\n".format(config.cache_config
+        #                                                                           ))
         return config
 
     def _is_v1_supported_oracle(self, model_config: ModelConfig) -> bool:

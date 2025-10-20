@@ -108,7 +108,7 @@ class RMSNorm(CustomOp):
         self.variance_epsilon = eps
         self.variance_size_override = (None if var_hidden_size == hidden_size
                                        else var_hidden_size)
-        print("### RMSorm self.variance_size_override: {}\n".format(self.variance_size_override))
+        # print("### RMSorm self.variance_size_override: {}\n".format(self.variance_size_override))
         self.has_weight = has_weight
         if dtype is not None:
             self.weight = torch.ones(hidden_size, dtype=dtype)

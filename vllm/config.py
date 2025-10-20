@@ -469,19 +469,19 @@ class ModelConfig:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(self.model,
                                                        self.served_model_name)
-        print("### self.served_model_name: {}".format(self.served_model_name))
+        # print("### self.served_model_name: {}".format(self.served_model_name))
         self.model = maybe_model_redirect(self.model)
-        print("### self.model: {}".format(self.model))
+        # print("### self.model: {}".format(self.model))
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
             self.tokenizer = self.model
         if self.tokenizer_revision is None:
             self.tokenizer_revision = self.revision
         self.tokenizer = maybe_model_redirect(self.tokenizer)
-        print("### self.tokenizer: {}".format(self.tokenizer))
+        # print("### self.tokenizer: {}".format(self.tokenizer))
         if isinstance(self.hf_config_path, str):
             self.hf_config_path = maybe_model_redirect(self.hf_config_path)
-        print("### after maybe_model_redirect\n")
+        # print("### after maybe_model_redirect\n")
         if callable(self.hf_overrides):
             hf_overrides_kw = {}
             hf_overrides_fn = self.hf_overrides
@@ -507,7 +507,7 @@ class ModelConfig:
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         self.maybe_pull_model_tokenizer_for_s3(self.model, self.tokenizer)
-        print("### after maybe_pull_model_tokenizer_for_s3\n")
+        # print("### after maybe_pull_model_tokenizer_for_s3\n")
         if (backend := envs.VLLM_ATTENTION_BACKEND
             ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
             raise ValueError(
@@ -529,17 +529,17 @@ class ModelConfig:
             raise ValueError(
                 "Sleep mode is not supported on current platform.")
 
-        print("### before ConfigFormat\n")
+        # print("### before ConfigFormat\n")
 
         if isinstance(self.config_format, str):
             self.config_format = ConfigFormat(self.config_format)
         
-        print("### before get_config\n")
+        # print("### before get_config\n")
 
         hf_config = get_config(self.hf_config_path or self.model,
                                self.trust_remote_code, self.revision,
                                self.code_revision, self.config_format)
-        print("### hf_config: {}".format(hf_config))
+        # print("### hf_config: {}".format(hf_config))
         if hf_overrides_kw:
             logger.debug("Overriding HF config with %s", hf_overrides_kw)
             hf_config.update(hf_overrides_kw)
@@ -565,7 +565,7 @@ class ModelConfig:
             self.truncation_side = "right"
 
         model_info, arch = self.registry.inspect_model_cls(self.architectures)
-        print("### model_info: {} arch: {}".format(model_info, arch))
+        # print("### model_info: {} arch: {}".format(model_info, arch))
         self._model_info = model_info
         self._architecture = arch
 
@@ -1290,7 +1290,7 @@ class ModelConfig:
                             not self.has_noops and \
                             not self.is_attention_free
         start, end = self.get_layers_start_end_indices(parallel_config)
-        print("### get_num_layers_by_block_type is_transformer: {}, self.is_hybrid: {}\n".format(is_transformer, self.is_hybrid))
+        # print("### get_num_layers_by_block_type is_transformer: {}, self.is_hybrid: {}\n".format(is_transformer, self.is_hybrid))
         if is_transformer:
             # Handle the basic case first
             return end - start if attn_block_type else 0
@@ -1307,7 +1307,7 @@ class ModelConfig:
             # Hybrid model Jamba
             layers_block_type_value = getattr(self.hf_config,
                                               "layers_block_type", None)
-            print("### get_num_layers_by_block_type is_transformer: {}, layers_block_type_value: {}\n".format(is_transformer, layers_block_type_value))
+            # print("### get_num_layers_by_block_type is_transformer: {}, layers_block_type_value: {}\n".format(is_transformer, layers_block_type_value))
 
             if layers_block_type_value is not None:
                 if hasattr(self.hf_text_config,
@@ -1323,7 +1323,7 @@ class ModelConfig:
 
             # Hybrid model Minimax
             attn_type_list = getattr(self.hf_config, "attn_type_list", None)
-            print("### get_num_layers_by_block_type is_transformer: {}, attn_type_list: {}\n".format(is_transformer, attn_type_list))
+            # print("### get_num_layers_by_block_type is_transformer: {}, attn_type_list: {}\n".format(is_transformer, attn_type_list))
 
             if attn_type_list:
                 return sum(t == 1 for t in attn_type_list[start:end])
@@ -1479,7 +1479,7 @@ class ModelConfig:
                 self.tokenizer,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.tokenizer_revision)
-        print("### get_and_verify_max_len max_model_len: {}\n".format(max_model_len))
+        # print("### get_and_verify_max_len max_model_len: {}\n".format(max_model_len))
         max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             tokenizer_config=tokenizer_config,
@@ -2260,7 +2260,7 @@ class SchedulerConfig:
         if self.max_num_seqs is None:
             # self.max_num_seqs = 128
             self.max_num_seqs = 1
-        print("### __post_init__ max_num_seqs: {}\n".format(self.max_num_seqs))
+        # print("### __post_init__ max_num_seqs: {}\n".format(self.max_num_seqs))
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
                 if self.num_scheduler_steps > 1:

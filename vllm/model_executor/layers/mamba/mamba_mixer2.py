@@ -310,7 +310,7 @@ class MambaMixer2(CustomOp):
         # doesn't allow to override it
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
-        print("### MambaMixer2 quant_config: {}\n".format(quant_config))
+        # print("### MambaMixer2 quant_config: {}\n".format(quant_config))
         self.in_proj = ColumnParallelLinear(
             input_size=hidden_size,
             output_size=intermediate_size + self.conv_dim + self.num_heads,

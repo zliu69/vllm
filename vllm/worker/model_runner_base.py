@@ -186,7 +186,7 @@ class ModelRunnerBase(ABC, Generic[T]):
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
-        print("### ModelRunnerBase self.scheduler_config: {}\n".format(self.scheduler_config))
+        # print("### ModelRunnerBase self.scheduler_config: {}\n".format(self.scheduler_config))
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
